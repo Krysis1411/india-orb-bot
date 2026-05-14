@@ -1,0 +1,9 @@
+# Backtesting dependencies
+# Install with: pip install -r requirements-backtest.txt
+#
+# nautilus_trader requires Python 3.11-3.13 and a Rust toolchain on first install.
+# Pre-built wheels are available on PyPI for Linux/macOS/Windows x86-64.
+
+nautilus_trader>=1.200.0
+yfinance>=0.2.40
+pandas>=2.0.0
