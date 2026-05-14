@@ -1,4 +1,11 @@
-SYMBOLS = ['AAPL', 'MSFT', 'GOOGL', 'NVDA', 'AMZN', 'META', 'SPY', 'QQQ']
+SYMBOLS = [
+    # Large cap tech
+    'AAPL', 'MSFT', 'GOOGL', 'NVDA', 'AMZN', 'META',
+    # ETFs
+    'SPY', 'QQQ',
+    # Small cap
+    'SOFI', 'HOOD', 'RBLX', 'DKNG', 'MARA', 'RIOT', 'IONQ',
+]
 
 # RSI settings
 RSI_PERIOD = 14
