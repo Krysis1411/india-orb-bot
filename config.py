@@ -32,17 +32,46 @@ BACKTEST_SYMBOLS = ["AAPL", "MSFT", "SPY"]
 # ORB day trading settings
 # ---------------------------------------------------------------------------
 
-# Only trade the most liquid names — tight spreads matter intraday
 ORB_SYMBOLS = [
-    # Mega-cap tech — highest volume, tight spreads, reliable intraday range
+    # Mega-cap tech — highest volume, tight spreads, reliable ORB patterns
     "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA",
+
     # Semiconductors — high beta, big intraday moves
-    "AMD", "AVGO",
-    # Broad market ETFs — always liquid, good for reading market direction
+    "AMD", "AVGO", "SMCI",
+
+    # Broad market ETFs
     "SPY", "QQQ", "IWM",
-    # Sector ETFs — diversify signal sources
+
+    # Sector ETFs
     "XLF",   # Financials
     "XLE",   # Energy
+    "ARKK",  # Cathie Wood ARK Innovation — tracks speculative tech, very volatile
+
+    # High-volatility mid-cap
+    "COIN",  # Coinbase — trades like a crypto asset, huge intraday swings
+    "PLTR",  # Palantir — AI/defence, high retail interest
+    "RIVN",  # Rivian — EV, wide daily ranges
+    "LCID",  # Lucid Motors — low float, big % moves
+    "UPST",  # Upstart — fintech, one of the most volatile mid-caps
+    "DKNG",  # DraftKings — sports betting, event-driven spikes
+    "HOOD",  # Robinhood — retail brokerage, moves with market sentiment
+    "SOFI",  # SoFi — volatile fintech
+
+    # Crypto miners — extreme beta, move 2-5× SPY on big days
+    "MARA",  # Marathon Digital
+    "RIOT",  # Riot Platforms
+    "CLSK",  # CleanSpark
+
+    # AI / quantum speculative plays — small float, huge % swings
+    "IONQ",  # IonQ — quantum computing
+    "SOUN",  # SoundHound AI — very low float, big intraday spikes
+    "AI",    # C3.ai
+    "BBAI",  # BigBear.ai — micro-cap, extreme volatility
+    "RBLX",  # Roblox — gaming/metaverse
+
+    # Meme / high-short-interest — unpredictable but active
+    "GME",   # GameStop
+    "AMC",   # AMC Entertainment
 ]
 
 # Opening range = first N × 5-min bars (6 bars = 30 minutes, 9:30–10:00 ET)
