@@ -33,43 +33,38 @@ BACKTEST_SYMBOLS = ["AAPL", "MSFT", "SPY"]
 # ---------------------------------------------------------------------------
 
 ORB_SYMBOLS = [
-    # Mega-cap tech — highest volume, tight spreads, reliable ORB patterns
-    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA",
+    # Mega-cap tech
+    "AAPL", "MSFT", "META", "GOOGL", "TSLA",
 
-    # Semiconductors — high beta, big intraday moves
+    # Semiconductors
     "AMD", "AVGO", "SMCI",
 
-    # Broad market ETFs — SPY removed (too stable for ORB, 14 trades barely any P&L)
+    # ETFs
     "QQQ", "IWM",
 
-    # Sector ETFs
-    "XLF",   # Financials
+    # Sector ETF
     "XLE",   # Energy
-    "ARKK",  # ARK Innovation — tracks speculative tech, very volatile
+
+    # ARK Innovation
+    "ARKK",
 
     # High-volatility mid-cap
-    "COIN",  # Coinbase — trades like a crypto asset, huge intraday swings
-    "PLTR",  # Palantir — AI/defence, high retail interest
-    "RIVN",  # Rivian — EV, wide daily ranges
-    "LCID",  # Lucid Motors — low float, big % moves
-    "UPST",  # Upstart — fintech, one of the most volatile mid-caps
-    "DKNG",  # DraftKings — sports betting, event-driven spikes
-    "HOOD",  # Robinhood — retail brokerage, moves with market sentiment
-    "SOFI",  # SoFi — volatile fintech
+    "COIN",  # Coinbase
+    "LCID",  # Lucid Motors
+    "UPST",  # Upstart
+    "DKNG",  # DraftKings
+    "HOOD",  # Robinhood
+    "SOFI",  # SoFi
 
-    # Crypto miners — extreme beta, move 2-5× market on big days
-    "MARA",  # Marathon Digital
-    "RIOT",  # Riot Platforms
+    # Crypto miner (profitable)
     "CLSK",  # CleanSpark
 
-    # AI / quantum speculative plays — small float, huge % swings
-    "IONQ",  # IonQ — quantum computing
-    "SOUN",  # SoundHound AI — very low float, big intraday spikes
-    "AI",    # C3.ai
-    "BBAI",  # BigBear.ai — micro-cap, extreme volatility
-    "RBLX",  # Roblox — gaming/metaverse
+    # AI / quantum
+    "IONQ",  # IonQ
+    "SOUN",  # SoundHound AI
+    "RBLX",  # Roblox
 
-    # Meme / high-short-interest — unpredictable but active
+    # Meme
     "GME",   # GameStop
     "AMC",   # AMC Entertainment
 ]
@@ -84,9 +79,10 @@ ORB_PROFIT_MULTIPLIER = 1.5
 # Volatile/fast movers: take profit at 1.0× before reversal
 # Slow/large movers: wait for 2.0-2.5× as they grind more steadily
 ORB_PROFIT_MULTIPLIERS: dict[str, float] = {
-    "MARA": 1.0, "RIOT": 1.0, "CLSK": 1.0, "SOUN": 1.0,
-    "BBAI": 1.0, "GME":  1.0, "AMC":  1.0, "AI":   1.0,
-    "AMZN": 2.5, "PLTR": 2.0, "XLF":  2.0, "DKNG": 2.0,
+    # Volatile/fast movers — take profit quickly before reversal
+    "CLSK": 1.0, "SOUN": 1.0, "GME": 1.0, "AMC": 1.0,
+    # Slower movers — give more room to reach target
+    "DKNG": 2.0,
 }
 
 # Minimum OR range as fraction of stock price — skip narrow/indecisive opens
