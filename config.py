@@ -77,8 +77,20 @@ ORB_SYMBOLS = [
 # Opening range = first N × 5-min bars (6 bars = 30 minutes, 9:30–10:00 ET)
 ORB_RANGE_BARS = 6
 
-# Profit target = OR range × this multiplier above the OR high
+# Default profit target = OR range × this multiplier above the OR high
 ORB_PROFIT_MULTIPLIER = 1.5
+
+# Per-symbol profit multipliers (overrides default above)
+# Volatile/fast movers: take profit at 1.0× before reversal
+# Slow/large movers: wait for 2.0-2.5× as they grind more steadily
+ORB_PROFIT_MULTIPLIERS: dict[str, float] = {
+    "MARA": 1.0, "RIOT": 1.0, "CLSK": 1.0, "SOUN": 1.0,
+    "BBAI": 1.0, "GME":  1.0, "AMC":  1.0, "AI":   1.0,
+    "AMZN": 2.5, "PLTR": 2.0, "XLF":  2.0, "DKNG": 2.0,
+}
+
+# Minimum OR range as fraction of stock price — skip narrow/indecisive opens
+ORB_MIN_OR_PCT = 0.005  # 0.5%
 
 # Breakout bar volume must be >= (avg OR bar volume × this factor)
 # Lowered from 1.2 → 1.0: 1.2 blocked all NVDA signals in backtest
