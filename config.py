@@ -99,6 +99,5 @@ ORB_STOP_BUFFER = 0.05
 ORB_CLOSE_HOUR = 15
 ORB_CLOSE_MINUTE = 45
 
-# Shares per trade for the ORB bot
-# Raised from 10 → 50: 10 shares produced ~$5/trade, not meaningful even on paper
-ORB_TRADE_QUANTITY = 50
+# Dollar amount to deploy per ORB trade — qty = floor(ORB_POSITION_SIZE / entry_price)
+ORB_POSITION_SIZE = 1_000
