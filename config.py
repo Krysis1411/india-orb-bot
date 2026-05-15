@@ -39,13 +39,13 @@ ORB_SYMBOLS = [
     # Semiconductors — high beta, big intraday moves
     "AMD", "AVGO", "SMCI",
 
-    # Broad market ETFs
-    "SPY", "QQQ", "IWM",
+    # Broad market ETFs — SPY removed (too stable for ORB, 14 trades barely any P&L)
+    "QQQ", "IWM",
 
     # Sector ETFs
     "XLF",   # Financials
     "XLE",   # Energy
-    "ARKK",  # Cathie Wood ARK Innovation — tracks speculative tech, very volatile
+    "ARKK",  # ARK Innovation — tracks speculative tech, very volatile
 
     # High-volatility mid-cap
     "COIN",  # Coinbase — trades like a crypto asset, huge intraday swings
@@ -57,7 +57,7 @@ ORB_SYMBOLS = [
     "HOOD",  # Robinhood — retail brokerage, moves with market sentiment
     "SOFI",  # SoFi — volatile fintech
 
-    # Crypto miners — extreme beta, move 2-5× SPY on big days
+    # Crypto miners — extreme beta, move 2-5× market on big days
     "MARA",  # Marathon Digital
     "RIOT",  # Riot Platforms
     "CLSK",  # CleanSpark
@@ -81,7 +81,8 @@ ORB_RANGE_BARS = 6
 ORB_PROFIT_MULTIPLIER = 1.5
 
 # Breakout bar volume must be >= (avg OR bar volume × this factor)
-ORB_VOLUME_FACTOR = 1.2
+# Lowered from 1.2 → 1.0: 1.2 blocked all NVDA signals in backtest
+ORB_VOLUME_FACTOR = 1.0
 
 # Stop is placed just below the OR low (in dollars)
 ORB_STOP_BUFFER = 0.05
@@ -91,4 +92,5 @@ ORB_CLOSE_HOUR = 15
 ORB_CLOSE_MINUTE = 45
 
 # Shares per trade for the ORB bot
-ORB_TRADE_QUANTITY = 10
+# Raised from 10 → 50: 10 shares produced ~$5/trade, not meaningful even on paper
+ORB_TRADE_QUANTITY = 50
