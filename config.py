@@ -1,32 +1,4 @@
-SYMBOLS = [
-    # Large cap tech
-    "AAPL", "MSFT", "GOOGL", "NVDA", "AMZN", "META",
-    # ETFs
-    "SPY", "QQQ",
-    # Small cap / speculative
-    "SOFI", "HOOD", "RBLX", "DKNG", "MARA", "RIOT", "IONQ",
-]
-
-# RSI settings (swing strategy)
-RSI_PERIOD = 14
-RSI_OVERSOLD = 35     # Buy when RSI drops below this
-RSI_OVERBOUGHT = 65   # Sell when RSI rises above this
-
-# Trend filter — only buy if price is above the N-day MA (uptrend)
-MA_TREND_PERIOD = 200
-
-# Exit settings (swing)
-STOP_LOSS_PCT = 2.0   # Exit if position is down this many percent
-
-# Position sizing (swing)
-TRADE_QUANTITY = 1    # Shares per trade (swing live bot)
-
-# ---------------------------------------------------------------------------
-# Backtest settings
-# ---------------------------------------------------------------------------
-
 BACKTEST_STARTING_BALANCE = 100_000.0
-BACKTEST_SYMBOLS = ["AAPL", "MSFT", "SPY"]
 
 # ---------------------------------------------------------------------------
 # ORB day trading settings
