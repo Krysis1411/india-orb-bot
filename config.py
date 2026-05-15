@@ -33,7 +33,17 @@ BACKTEST_SYMBOLS = ["AAPL", "MSFT", "SPY"]
 # ---------------------------------------------------------------------------
 
 # Only trade the most liquid names — tight spreads matter intraday
-ORB_SYMBOLS = ["AAPL", "MSFT", "NVDA", "SPY", "QQQ"]
+ORB_SYMBOLS = [
+    # Mega-cap tech — highest volume, tight spreads, reliable intraday range
+    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA",
+    # Semiconductors — high beta, big intraday moves
+    "AMD", "AVGO",
+    # Broad market ETFs — always liquid, good for reading market direction
+    "SPY", "QQQ", "IWM",
+    # Sector ETFs — diversify signal sources
+    "XLF",   # Financials
+    "XLE",   # Energy
+]
 
 # Opening range = first N × 5-min bars (6 bars = 30 minutes, 9:30–10:00 ET)
 ORB_RANGE_BARS = 6
