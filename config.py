@@ -1,44 +1,28 @@
-BACKTEST_STARTING_BALANCE = 100_000.0
+BACKTEST_STARTING_BALANCE = 2000.0
 
 # ---------------------------------------------------------------------------
 # ORB day trading settings
 # ---------------------------------------------------------------------------
 
 ORB_SYMBOLS = [
-    # Mega-cap tech
-    "AAPL", "MSFT", "META", "GOOGL", "TSLA",
-
-    # Semiconductors
-    "AMD", "AVGO", "SMCI",
-
-    # ETFs
-    "QQQ", "IWM",
-
-    # Sector ETF
-    "XLE",   # Energy
-
-    # ARK Innovation
-    "ARKK",
-
-    # High-volatility mid-cap
-    "COIN",  # Coinbase
-    "LCID",  # Lucid Motors
-    "UPST",  # Upstart
-    "DKNG",  # DraftKings
-    "HOOD",  # Robinhood
-    "SOFI",  # SoFi
-
-    # Crypto miner (profitable)
-    "CLSK",  # CleanSpark
-
-    # AI / quantum
-    "IONQ",  # IonQ
-    "SOUN",  # SoundHound AI
-    "RBLX",  # Roblox
-
-    # Meme
-    "GME",   # GameStop
-    "AMC",   # AMC Entertainment
+    # Penny / High-Volatility Stocks
+    "MULN",  # Mullen Automotive
+    "SNDL",  # Sundial Growers
+    "ZOM",   # Zomedica
+    "CTRM",  # Castor Maritime
+    "TNXP",  # Tonix Pharmaceuticals
+    "IDEX",  # Ideanomics
+    "FCEL",  # FuelCell Energy
+    "JAGX",  # Jaguar Health
+    "CEI",   # Camber Energy
+    "GEVO",  # Gevo, Inc.
+    "ATOS",  # Atossa Therapeutics
+    "OCGN",  # Ocugen
+    "SENS",  # Senseonics
+    "BNGO",  # Bionano Genomics
+    "ANY",   # Sphere 3D
+    "HUT",   # Hut 8
+    "NAK",   # Northern Dynasty
 ]
 
 # Opening range = first N × 5-min bars (6 bars = 30 minutes, 9:30–10:00 ET)
@@ -72,4 +56,4 @@ ORB_CLOSE_HOUR = 15
 ORB_CLOSE_MINUTE = 45
 
 # Dollar amount to deploy per ORB trade — qty = floor(ORB_POSITION_SIZE / entry_price)
-ORB_POSITION_SIZE = 1_000
+ORB_POSITION_SIZE = 500
