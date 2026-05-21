@@ -4,26 +4,9 @@ BACKTEST_STARTING_BALANCE = 2000.0
 # ORB day trading settings
 # ---------------------------------------------------------------------------
 
-ORB_SYMBOLS = [
-    # Penny / High-Volatility Stocks
-    "MULN",  # Mullen Automotive
-    "SNDL",  # Sundial Growers
-    "ZOM",   # Zomedica
-    "CTRM",  # Castor Maritime
-    "TNXP",  # Tonix Pharmaceuticals
-    "IDEX",  # Ideanomics
-    "FCEL",  # FuelCell Energy
-    "JAGX",  # Jaguar Health
-    "CEI",   # Camber Energy
-    "GEVO",  # Gevo, Inc.
-    "ATOS",  # Atossa Therapeutics
-    "OCGN",  # Ocugen
-    "SENS",  # Senseonics
-    "BNGO",  # Bionano Genomics
-    "ANY",   # Sphere 3D
-    "HUT",   # Hut 8
-    "NAK",   # Northern Dynasty
-]
+# Number of active stocks to fetch from OpenBB screener daily
+ORB_SCREENER_LIMIT = 20
+ORB_SCREENER_PROVIDER = "yfinance"
 
 # Opening range = first N × 5-min bars (6 bars = 30 minutes, 9:30–10:00 ET)
 ORB_RANGE_BARS = 6
@@ -57,3 +40,6 @@ ORB_CLOSE_MINUTE = 45
 
 # Dollar amount to deploy per ORB trade — qty = floor(ORB_POSITION_SIZE / entry_price)
 ORB_POSITION_SIZE = 500
+
+# Maximum total investment budget for the bot across all trades (in dollars)
+MAX_TOTAL_INVESTMENT = 2000
