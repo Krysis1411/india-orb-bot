@@ -1,6 +1,29 @@
 BACKTEST_STARTING_BALANCE = 2000.0
 
 # ---------------------------------------------------------------------------
+# RSI swing trading settings (used by bot.py)
+# ---------------------------------------------------------------------------
+
+SYMBOLS = [
+    # Large cap tech
+    'AAPL', 'MSFT', 'GOOGL', 'NVDA', 'AMZN', 'META',
+    # ETFs
+    'SPY', 'QQQ',
+    # Small cap
+    'SOFI', 'HOOD', 'RBLX', 'DKNG', 'MARA', 'RIOT', 'IONQ',
+]
+
+RSI_PERIOD = 14
+RSI_OVERSOLD = 35
+RSI_OVERBOUGHT = 65
+
+MA_TREND_PERIOD = 200
+
+STOP_LOSS_PCT = 2.0  # Exit if position is down 2%
+
+TRADE_QUANTITY = 1
+
+# ---------------------------------------------------------------------------
 # ORB day trading settings
 # ---------------------------------------------------------------------------
 
