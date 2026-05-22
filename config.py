@@ -27,9 +27,18 @@ TRADE_QUANTITY = 1
 # ORB day trading settings
 # ---------------------------------------------------------------------------
 
-# Number of active stocks to fetch from OpenBB screener daily
+# Number of active stocks to fetch from screener daily
 ORB_SCREENER_LIMIT = 20
-ORB_SCREENER_PROVIDER = "yfinance"
+
+# Static fallback symbol list used when the live screener fails
+ORB_SYMBOLS = [
+    "AAPL", "MSFT", "META", "GOOGL", "TSLA",
+    "AMD", "AVGO", "SMCI",
+    "QQQ", "IWM",
+    "COIN", "DKNG", "HOOD", "SOFI",
+    "CLSK", "IONQ", "SOUN", "RBLX",
+    "GME", "AMC",
+]
 
 # Opening range = first N × 5-min bars (6 bars = 30 minutes, 9:30–10:00 ET)
 ORB_RANGE_BARS = 6
