@@ -75,3 +75,11 @@ ORB_POSITION_SIZE = 500
 
 # Maximum total investment budget for the bot across all trades (in dollars)
 MAX_TOTAL_INVESTMENT = 2000
+
+# ---------------------------------------------------------------------------
+# Options-specific settings
+# ---------------------------------------------------------------------------
+ORB_OPTIONS_POSITION_SIZE = 500  # Target allocation per options strategy trade
+MAX_OPTIONS_INVESTMENT = 2000     # Total maximum budget for all options positions
+ORB_OPTIONS_IV_THRESHOLD = 0.45   # Implied Volatility threshold to select between buying/selling premium
+
