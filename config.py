@@ -83,3 +83,11 @@ ORB_OPTIONS_POSITION_SIZE = 500  # Target allocation per options strategy trade
 MAX_OPTIONS_INVESTMENT = 2000     # Total maximum budget for all options positions
 ORB_OPTIONS_IV_THRESHOLD = 0.45   # Implied Volatility threshold to select between buying/selling premium
 
+# ---------------------------------------------------------------------------
+# Risk controls (adapted from trading00money/QuantTrading risk_engine.py)
+# ---------------------------------------------------------------------------
+DAILY_LOSS_LIMIT_PCT   = 0.05   # Kill new entries if today's P&L < -5% of last equity
+MAX_DRAWDOWN_PCT       = 0.20   # Hard kill-switch: close all if drawdown > 20%
+MAX_RISK_PER_TRADE_PCT = 0.02   # Max 2% of account per trade (used for position sizing)
+MIN_RR_RATIO           = 1.5    # Skip trade if reward:risk < 1.5 (from rr_engine.py)
+
