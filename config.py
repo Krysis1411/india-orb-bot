@@ -91,3 +91,38 @@ MAX_DRAWDOWN_PCT       = 0.20   # Hard kill-switch: close all if drawdown > 20%
 MAX_RISK_PER_TRADE_PCT = 0.02   # Max 2% of account per trade (used for position sizing)
 MIN_RR_RATIO           = 1.5    # Skip trade if reward:risk < 1.5 (from rr_engine.py)
 
+# ---------------------------------------------------------------------------
+# Iron Condor quality filters (address root causes of consistent losses)
+# ---------------------------------------------------------------------------
+IC_MAX_DTE          = 1     # Only enter ICs expiring today or tomorrow (0–1 DTE)
+                            # Multi-day condors breach almost always — 4-day holds = 2× daily sigma exposure
+MIN_UNDERLYING_PRICE = 20.0 # Skip options on stocks under $20 — illiquid chains, wide spreads
+IC_MIN_CREDIT_RATIO = 0.20  # Credit must be ≥ 20% of spread width; below this R:R is negative EV
+IC_SIGMA_MULTIPLE   = 1.5   # Short strikes must be ≥ 1.5× expected move away from current price
+IC_PROFIT_TARGET_PCT = 0.50 # Close IC when unrealised P&L reaches 50% of credit received
+IC_PNL_STOP_MULTIPLE = 2.0  # P&L stop: close if total loss > 2× credit received
+
+# ---------------------------------------------------------------------------
+# Entry quality filters (derived from backtest analysis)
+# ---------------------------------------------------------------------------
+
+# Symbols that consistently lose money in backtest regardless of strategy.
+# Large-caps / ETFs with low IV rank get routed to debit spreads/straddles
+# which need a 1.5× OR-range move that these tickers never deliver.
+# Backtest losses: META -$2,734 | IWM -$1,872 | MSFT -$1,071 | AAPL -$100 | GME -$197
+ORB_OPTIONS_BLOCKLIST = ['AAPL', 'MSFT', 'IWM', 'META', 'GME']
+
+# Skip new entries on Mondays — backtest win rate 14.3% (vs 26–31% Tue–Thu).
+# OR ranges on Mondays are noisy (weekend gap, low early volume).
+SKIP_MONDAY_ENTRIES = True
+
+# Hard cutoff for new entries — backtest win rate after 12:30 PM is 7.5%
+# (3/40 trades hit target; 37 expire at EOD with near-zero theta collected).
+IC_MAX_ENTRY_HOUR   = 12
+IC_MAX_ENTRY_MINUTE = 30
+
+# Minimum price distance through the OR boundary before entering a directional spread.
+# Backtest: <0.5% breakout → 15% win rate | >1% breakout → 52% win rate.
+# Applied only to Bull Call / Bear Put / Straddle entries, not Iron Condors.
+MIN_BREAKOUT_STRENGTH_PCT = 0.005  # price must be ≥ 0.5% beyond OR high/low
+
