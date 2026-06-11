@@ -96,8 +96,8 @@ MIN_RR_RATIO           = 1.5    # Skip trade if reward:risk < 1.5 (from rr_engin
 # ---------------------------------------------------------------------------
 IC_MAX_DTE          = 1     # Only enter ICs expiring today or tomorrow (0–1 DTE)
                             # Multi-day condors breach almost always — 4-day holds = 2× daily sigma exposure
-MIN_UNDERLYING_PRICE = 20.0 # Skip options on stocks under $20 — illiquid chains, wide spreads
-IC_MIN_CREDIT_RATIO = 0.20  # Credit must be ≥ 20% of spread width; below this R:R is negative EV
+MIN_UNDERLYING_PRICE = 10.0 # Skip options on true penny stocks; liquid names (SOFI, AAL, F) trade fine at $10–20
+IC_MIN_CREDIT_RATIO = 0.15  # Credit must be ≥ 15% of spread width; loosened from 0.20 to allow more setups
 IC_SIGMA_MULTIPLE   = 1.5   # Short strikes must be ≥ 1.5× expected move away from current price
 IC_PROFIT_TARGET_PCT = 0.50 # Close IC when unrealised P&L reaches 50% of credit received
 IC_PNL_STOP_MULTIPLE = 2.0  # P&L stop: close if total loss > 2× credit received
@@ -110,16 +110,17 @@ IC_PNL_STOP_MULTIPLE = 2.0  # P&L stop: close if total loss > 2× credit receive
 # Large-caps / ETFs with low IV rank get routed to debit spreads/straddles
 # which need a 1.5× OR-range move that these tickers never deliver.
 # Backtest losses: META -$2,734 | IWM -$1,872 | MSFT -$1,071 | AAPL -$100 | GME -$197
-ORB_OPTIONS_BLOCKLIST = ['AAPL', 'MSFT', 'IWM', 'META', 'GME']
+# NU: live loss — IC credit ratio only ~7%, options chain too illiquid at this price
+ORB_OPTIONS_BLOCKLIST = ['AAPL', 'MSFT', 'IWM', 'META', 'GME', 'NU']
 
 # Skip new entries on Mondays — backtest win rate 14.3% (vs 26–31% Tue–Thu).
 # OR ranges on Mondays are noisy (weekend gap, low early volume).
 SKIP_MONDAY_ENTRIES = True
 
-# Hard cutoff for new entries — backtest win rate after 12:30 PM is 7.5%
-# (3/40 trades hit target; 37 expire at EOD with near-zero theta collected).
-IC_MAX_ENTRY_HOUR   = 12
-IC_MAX_ENTRY_MINUTE = 30
+# Hard cutoff for new entries — backtest shows declining win rate after 12:30 PM (7.5% after that).
+# Extended to 1:00 PM to capture more of the morning window without going into the dead-money zone.
+IC_MAX_ENTRY_HOUR   = 13
+IC_MAX_ENTRY_MINUTE = 0
 
 # Minimum price distance through the OR boundary before entering a directional spread.
 # Backtest: <0.5% breakout → 15% win rate | >1% breakout → 52% win rate.
