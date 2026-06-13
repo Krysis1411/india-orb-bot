@@ -40,6 +40,7 @@ from config import (
     INDIA_CLOSE_MINUTE,
     INDIA_MAX_ENTRY_HOUR,
     INDIA_MAX_ENTRY_MINUTE,
+    INDIA_ORB_MAX_OR_PCT,
     INDIA_ORB_MIN_OR_PCT,
     INDIA_ORB_PROFIT_MULTIPLIER,
     INDIA_ORB_RANGE_BARS,
@@ -87,6 +88,7 @@ class IndiaORBConfig(StrategyConfig, frozen=True):
     volume_factor: PositiveFloat = INDIA_ORB_VOLUME_FACTOR
     stop_buffer_pct: float = INDIA_ORB_STOP_BUFFER_PCT
     min_or_pct: float = INDIA_ORB_MIN_OR_PCT
+    max_or_pct: float = INDIA_ORB_MAX_OR_PCT
     nifty_bar_type: BarType | None = None  # supply to enable Nifty trend filter
     trailing_stop: bool = True             # move stop to breakeven at 0.5× target
     allow_shorts: bool = INDIA_ALLOW_SHORTS  # trade breakouts below OR low as short sells
@@ -285,8 +287,12 @@ class IndiaORBStrategy(Strategy):
                 return
 
             or_range = self._or_high - self._or_low
-            if self._or_high > 0 and or_range / self._or_high < self.config.min_or_pct:
-                self._range_skip = True    # OR too narrow — skip today
+            or_pct   = or_range / self._or_high if self._or_high > 0 else 0
+            if or_pct < self.config.min_or_pct:
+                self._range_skip = True    # OR too narrow — flat/indecisive open
+                return
+            if self.config.max_or_pct > 0 and or_pct > self.config.max_or_pct:
+                self._range_skip = True    # OR too wide — gap/spike day, stops blow out
                 return
 
             self._range_ready = True

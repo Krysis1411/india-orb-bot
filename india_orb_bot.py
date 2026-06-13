@@ -38,6 +38,7 @@ from config import (
     INDIA_MAX_ENTRY_HOUR,
     INDIA_MAX_ENTRY_MINUTE,
     INDIA_MAX_TOTAL_INR,
+    INDIA_ORB_MAX_OR_PCT,
     INDIA_ORB_MIN_OR_PCT,
     INDIA_ORB_PROFIT_MULTIPLIER,
     INDIA_ORB_RANGE_BARS,
@@ -145,11 +146,12 @@ def process_symbol(
         log.info(f"{symbol}: ORB window not closed yet")
         return False
 
-    if INDIA_ORB_MIN_OR_PCT > 0 and or_range / or_high < INDIA_ORB_MIN_OR_PCT:
-        log.info(
-            f"{symbol}: OR too narrow"
-            f" ({or_range / or_high:.3%} < {INDIA_ORB_MIN_OR_PCT:.1%}) — skipping"
-        )
+    or_pct = or_range / or_high
+    if INDIA_ORB_MIN_OR_PCT > 0 and or_pct < INDIA_ORB_MIN_OR_PCT:
+        log.info(f"{symbol}: OR too narrow ({or_pct:.2%} < {INDIA_ORB_MIN_OR_PCT:.1%}) — skipping")
+        return False
+    if INDIA_ORB_MAX_OR_PCT > 0 and or_pct > INDIA_ORB_MAX_OR_PCT:
+        log.info(f"{symbol}: OR too wide ({or_pct:.2%} > {INDIA_ORB_MAX_OR_PCT:.1%}) — gap/spike day, skipping")
         return False
 
     current_bar    = bars.iloc[-1]

@@ -143,7 +143,10 @@ INDIA_POSITION_SIZE_INR = 5000    # ₹5,000 per trade
 INDIA_MAX_TOTAL_INR     = 15000   # max ₹15,000 deployed at once → 3 concurrent trades
 
 # ORB quality filters
-INDIA_ORB_MIN_OR_PCT        = 0.003  # 0.3% min OR range as % of price
+INDIA_ORB_MIN_OR_PCT        = 0.003  # 0.3% min OR range — skip flat/indecisive opens
+INDIA_ORB_MAX_OR_PCT        = 0.020  # 2.0% max OR range — skip gap/spike days
+                                      # Backtest: >2% OR → 35% win rate, -₹281 (vs 48% overall)
+                                      # Wide ranges = noisy, stops blow out too easily
 INDIA_ORB_PROFIT_MULTIPLIER = 1.5    # target = OR range × 1.5 beyond breakout level
 INDIA_ORB_VOLUME_FACTOR     = 1.0    # breakout volume must be ≥ 1× avg OR bar volume
 INDIA_ORB_STOP_BUFFER_PCT   = 0.005  # stop = 0.5% beyond OR boundary (optimizer best result)
@@ -153,8 +156,9 @@ INDIA_ALLOW_SHORTS = True
 
 # Entry quality filters
 INDIA_SKIP_MONDAY_ENTRIES = True   # Mondays tend to have noisier OR in India too
-INDIA_MAX_ENTRY_HOUR      = 13
-INDIA_MAX_ENTRY_MINUTE    = 0      # no new entries after 13:00 IST
+INDIA_MAX_ENTRY_HOUR      = 12
+INDIA_MAX_ENTRY_MINUTE    = 30     # no new entries after 12:30 IST
+                                   # Backtest: 12:30–13:00 → 42% win, -₹64 across 12 trades
 
 # Daily loss circuit-breaker
 INDIA_DAILY_LOSS_LIMIT_PCT = 0.05  # stop new entries if day P&L < -5%
