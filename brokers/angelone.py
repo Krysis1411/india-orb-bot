@@ -34,8 +34,10 @@ INTERVAL_1HOUR = "ONE_HOUR"
 INTERVAL_1DAY = "ONE_DAY"
 
 # Nifty 50 index on SmartAPI (NSE)
-NIFTY50_TOKEN = "99926000"
-NIFTY50_SYMBOL = "Nifty 50"
+# Token 99926000 is the well-known stable token for the Nifty 50 index.
+# get_nifty_trend() tries searchScrip first and falls back to this constant.
+_NIFTY50_FALLBACK_TOKEN = "99926000"
+_NIFTY50_SEARCH_TERM    = "Nifty 50"
 
 
 class AngelOneClient:
@@ -169,8 +171,17 @@ class AngelOneClient:
         Return (is_up, pct_change) for Nifty 50 today.
         Uses today's first bar open vs. latest bar close.
         Returns (None, 0.0) if data is unavailable.
+
+        Resolves the Nifty 50 token dynamically via searchScrip so it stays
+        correct even if AngelOne changes the well-known token (99926000).
         """
-        df = self.get_today_candles(NIFTY50_SYMBOL, NIFTY50_TOKEN)
+        # Try to resolve token via search; fall back to stable hardcoded token
+        token = self.resolve_token(_NIFTY50_SEARCH_TERM, exchange="NSE")
+        if token is None:
+            log.debug(f"Nifty50 token search failed — using fallback {_NIFTY50_FALLBACK_TOKEN}")
+            token = _NIFTY50_FALLBACK_TOKEN
+
+        df = self.get_today_candles(_NIFTY50_SEARCH_TERM, token, exchange="NSE")
         if df is None or df.empty:
             return None, 0.0
         open_price = float(df.iloc[0]["open"])
