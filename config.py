@@ -127,3 +127,47 @@ IC_MAX_ENTRY_MINUTE = 0
 # Applied only to Bull Call / Bear Put / Straddle entries, not Iron Condors.
 MIN_BREAKOUT_STRENGTH_PCT = 0.005  # price must be ≥ 0.5% beyond OR high/low
 
+# ---------------------------------------------------------------------------
+# India ORB settings (AngelOne SmartAPI / NSE)
+# ---------------------------------------------------------------------------
+
+# Opening range = first 6 × 5-min bars (09:15–09:45 IST)
+INDIA_ORB_RANGE_BARS = 6
+
+# EOD close: 15 min before NSE MIS auto-squareoff at 15:30 IST
+INDIA_CLOSE_HOUR   = 15
+INDIA_CLOSE_MINUTE = 15
+
+# Capital allocation per trade (INR)
+INDIA_POSITION_SIZE_INR = 5000    # ₹5,000 per trade
+INDIA_MAX_TOTAL_INR     = 20000   # max ₹20,000 deployed at once → 4 concurrent trades
+
+# ORB quality filters
+INDIA_ORB_MIN_OR_PCT        = 0.003  # 0.3% min OR range as % of price
+INDIA_ORB_PROFIT_MULTIPLIER = 1.5    # target = OR high + (OR range × 1.5)
+INDIA_ORB_VOLUME_FACTOR     = 1.0    # breakout volume must be ≥ 1× avg OR bar volume
+INDIA_ORB_STOP_BUFFER_PCT   = 0.002  # stop = OR low × (1 − 0.2%)
+
+# Entry quality filters
+INDIA_SKIP_MONDAY_ENTRIES = True   # Mondays tend to have noisier OR in India too
+INDIA_MAX_ENTRY_HOUR      = 13
+INDIA_MAX_ENTRY_MINUTE    = 0      # no new entries after 13:00 IST
+
+# Daily loss circuit-breaker
+INDIA_DAILY_LOSS_LIMIT_PCT = 0.05  # stop new entries if day P&L < -5%
+
+# Number of NSE symbols to scan each cycle
+INDIA_SCREENER_LIMIT = 15
+
+# Static fallback symbol list (Nifty 50 core + high-beta movers)
+INDIA_SYMBOLS = [
+    # Nifty 50 blue-chips — highest liquidity, reliable ORB setups
+    "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK",
+    "HINDUNILVR", "BAJFINANCE", "KOTAKBANK", "LT", "ITC",
+    "WIPRO", "HCLTECH", "AXISBANK", "TITAN", "MARUTI",
+    "SUNPHARMA", "BHARTIARTL", "SBIN", "ADANIENT", "POWERGRID",
+    # High-beta / active movers — stronger intraday range
+    "TATAMOTORS", "TATASTEEL", "JSWSTEEL", "ONGC", "NTPC",
+    "ZOMATO", "IRCTC", "DMART", "HDFCLIFE", "PIDILITIND",
+]
+
