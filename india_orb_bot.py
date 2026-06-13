@@ -30,6 +30,8 @@ from dotenv import load_dotenv
 
 from brokers.angelone import AngelOneClient
 from config import (
+    INDIA_ALLOW_SHORTS,
+    INDIA_BLOCKLIST,
     INDIA_CLOSE_HOUR,
     INDIA_CLOSE_MINUTE,
     INDIA_DAILY_LOSS_LIMIT_PCT,
@@ -49,6 +51,11 @@ from india_screener import get_active_nse_symbols
 load_dotenv()
 
 DRY_RUN = False  # Overridden to True by --dry-run CLI flag
+
+# Tracks live SL order IDs: symbol → order_id
+# Populated after entry; cancelled before any exit (target, EOD).
+# Exchange-level STOPLOSS_MARKET orders protect the position without polling.
+_sl_orders: dict[str, str] = {}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,6 +86,15 @@ def is_market_open() -> bool:
     t = now_ist().time()
     weekday = now_ist().weekday()  # 0=Mon … 4=Fri, 5=Sat, 6=Sun
     return weekday < 5 and MARKET_OPEN_IST <= t < MARKET_CLOSE_IST
+
+
+def cancel_sl(symbol: str) -> None:
+    """Cancel the pending exchange-level SL order for this symbol (if any)."""
+    order_id = _sl_orders.pop(symbol, None)
+    if order_id and not DRY_RUN:
+        client.cancel_order(order_id, variety="STOPLOSS")
+    elif order_id and DRY_RUN:
+        log.info(f"[DRY RUN] Cancel SL order {order_id} for {symbol}")
 
 
 def compute_opening_range(bars) -> tuple[float, float, float] | None:
@@ -140,10 +156,13 @@ def process_symbol(
     current_price  = float(current_bar["close"])
     current_volume = float(current_bar["volume"])
     now            = now_ist()
+    trade_qty      = max(1, int(INDIA_POSITION_SIZE_INR / current_price))
 
-    stop_price   = or_low * (1 - INDIA_ORB_STOP_BUFFER_PCT)
-    target_price = or_high + or_range * INDIA_ORB_PROFIT_MULTIPLIER
-    trade_qty    = max(1, int(INDIA_POSITION_SIZE_INR / current_price))
+    # Per-direction stop / target levels
+    long_stop    = or_low   * (1 - INDIA_ORB_STOP_BUFFER_PCT)
+    long_target  = or_high  + or_range * INDIA_ORB_PROFIT_MULTIPLIER
+    short_stop   = or_high  * (1 + INDIA_ORB_STOP_BUFFER_PCT)
+    short_target = or_low   - or_range * INDIA_ORB_PROFIT_MULTIPLIER
 
     log.info(
         f"{symbol} | ₹{current_price:.2f} | OR: ₹{or_low:.2f}–₹{or_high:.2f}"
@@ -154,13 +173,17 @@ def process_symbol(
     if now.time() >= CLOSE_TIME_IST:
         pos = client.get_position(symbol)
         if pos:
-            qty = int(pos["netqty"])
-            if qty > 0:
+            qty     = int(pos["netqty"])
+            is_long = qty > 0
+            close_side = "SELL" if is_long else "BUY"
+            abs_qty = abs(qty)
+            if abs_qty > 0:
+                cancel_sl(symbol)  # must cancel SL before placing exit order
                 if DRY_RUN:
-                    log.info(f"[DRY RUN] EOD CLOSE — SELL {qty} {symbol} at ~₹{current_price:.2f}")
+                    log.info(f"[DRY RUN] EOD CLOSE — {close_side} {abs_qty} {symbol} at ~₹{current_price:.2f}")
                 else:
-                    client.place_market_order(symbol, token, "SELL", qty)
-                    log.info(f"EOD CLOSE — SELL {qty} {symbol} at ~₹{current_price:.2f}")
+                    client.place_market_order(symbol, token, close_side, abs_qty)
+                    log.info(f"EOD CLOSE — {close_side} {abs_qty} {symbol} at ~₹{current_price:.2f}")
         return False
 
     # --- Manage existing position ---
@@ -168,39 +191,48 @@ def process_symbol(
     if pos:
         qty       = int(pos["netqty"])
         avg_price = float(pos.get("averageprice", current_price))
-        pnl_pct   = (current_price - avg_price) / avg_price * 100
+        is_long   = qty > 0
+        abs_qty   = abs(qty)
 
-        if current_price <= stop_price:
+        if is_long:
+            pnl_pct    = (current_price - avg_price) / avg_price * 100
+            hit_stop   = current_price <= long_stop
+            hit_target = current_price >= long_target
+            close_side = "SELL"
+        else:  # short position
+            pnl_pct    = (avg_price - current_price) / avg_price * 100
+            hit_stop   = current_price >= short_stop
+            hit_target = current_price <= short_target
+            close_side = "BUY"
+
+        if hit_stop or hit_target:
+            reason = "TAKE PROFIT" if hit_target else "STOP LOSS"
+            # For TAKE PROFIT: cancel SL order then exit at market
+            # For STOP LOSS:   the SL order already fired at exchange; just clean up
+            cancel_sl(symbol)
             if DRY_RUN:
-                log.info(f"[DRY RUN] STOP LOSS — SELL {qty} {symbol} at ~₹{current_price:.2f} | P&L: {pnl_pct:+.2f}%")
+                log.info(f"[DRY RUN] {reason} — {close_side} {abs_qty} {symbol} at ~₹{current_price:.2f} | P&L: {pnl_pct:+.2f}%")
+            elif hit_target:
+                client.place_market_order(symbol, token, close_side, abs_qty)
+                log.info(f"{reason} — {close_side} {abs_qty} {symbol} at ~₹{current_price:.2f} | P&L: {pnl_pct:+.2f}%")
             else:
-                client.place_market_order(symbol, token, "SELL", qty)
-                log.info(f"STOP LOSS — SELL {qty} {symbol} at ~₹{current_price:.2f} | P&L: {pnl_pct:+.2f}%")
+                log.info(f"{reason} — exchange SL order fired for {symbol} | P&L: {pnl_pct:+.2f}%")
             return False
 
-        if current_price >= target_price:
-            if DRY_RUN:
-                log.info(f"[DRY RUN] TAKE PROFIT — SELL {qty} {symbol} at ~₹{current_price:.2f} | P&L: {pnl_pct:+.2f}%")
-            else:
-                client.place_market_order(symbol, token, "SELL", qty)
-                log.info(f"TAKE PROFIT — SELL {qty} {symbol} at ~₹{current_price:.2f} | P&L: {pnl_pct:+.2f}%")
-            return False
-
+        direction_label = "LONG" if is_long else "SHORT"
         log.info(
-            f"{symbol} | Holding {qty} shares @ ₹{avg_price:.2f}"
+            f"{symbol} | {direction_label} {abs_qty} @ ₹{avg_price:.2f}"
             f" | P&L: {pnl_pct:+.2f}%"
-            f" | Stop: ₹{stop_price:.2f} | Target: ₹{target_price:.2f}"
+            f" | Stop: ₹{long_stop if is_long else short_stop:.2f}"
+            f" | Target: ₹{long_target if is_long else short_target:.2f}"
         )
         return False
 
-    # --- Entry gate checks ---
-
-    # No entries after cutoff time
+    # --- Entry gate checks (shared) ---
     if now.time() >= ENTRY_CUTOFF_IST:
-        log.info(f"{symbol}: past entry cutoff ({INDIA_MAX_ENTRY_HOUR}:{INDIA_MAX_ENTRY_MINUTE:02d} IST) — skipping")
+        log.info(f"{symbol}: past entry cutoff ({INDIA_MAX_ENTRY_HOUR}:{INDIA_MAX_ENTRY_MINUTE:02d} IST)")
         return False
 
-    # Monday skip
     if INDIA_SKIP_MONDAY_ENTRIES and now.weekday() == 0:
         log.info(f"{symbol}: Monday — skipping new entries")
         return False
@@ -209,58 +241,62 @@ def process_symbol(
         log.info(f"{symbol}: already traded today — skipping")
         return False
 
-    # Nifty trend filter
-    if nifty_up is False:
-        log.info(f"{symbol}: Nifty trending DOWN — skipping long entry")
-        return False
     if nifty_up is None:
         log.info(f"{symbol}: Nifty data not ready — skipping entry")
         return False
 
     vol_ok = current_volume >= avg_or_volume * INDIA_ORB_VOLUME_FACTOR
 
-    # Already shot past target — skip stale breakout
-    if current_price >= target_price:
-        log.info(f"{symbol}: price already past target ₹{target_price:.2f} — skipping stale breakout")
+    if open_positions_count >= max_open_positions:
+        log.info(f"{symbol}: budget limit ({open_positions_count}/{max_open_positions}) — skipping")
         return False
 
-    # --- Breakout entry ---
-    if current_price > or_high and vol_ok:
-        if open_positions_count >= max_open_positions:
-            log.info(
-                f"{symbol}: budget limit reached"
-                f" ({open_positions_count}/{max_open_positions} positions open) — skipping"
-            )
+    # --- Long breakout: above OR high, Nifty up ---
+    if current_price > or_high and vol_ok and nifty_up is not False:
+        if current_price >= long_target:
+            log.info(f"{symbol}: stale long breakout — already past target")
             return False
-
         if DRY_RUN:
             log.info(
-                f"[DRY RUN] BUY {trade_qty} {symbol}"
-                f" | ₹{current_price:.2f} | Cost: ~₹{trade_qty * current_price:,.0f}"
-                f" | Stop: ₹{stop_price:.2f} | Target: ₹{target_price:.2f}"
-                f" | Vol: {current_volume / avg_or_volume:.1f}×"
+                f"[DRY RUN] BUY {trade_qty} {symbol} | ₹{current_price:.2f}"
+                f" | Stop: ₹{long_stop:.2f} | Target: ₹{long_target:.2f}"
+                f" | Vol: {current_volume/avg_or_volume:.1f}×"
             )
             return True
-
         order_id = client.place_market_order(symbol, token, "BUY", trade_qty)
         if order_id:
-            log.info(
-                f"BUY BREAKOUT {trade_qty} {symbol}"
-                f" | ₹{current_price:.2f} | Cost: ~₹{trade_qty * current_price:,.0f}"
-                f" | Stop: ₹{stop_price:.2f} | Target: ₹{target_price:.2f}"
-                f" | Vol: {current_volume / avg_or_volume:.1f}×"
-            )
+            log.info(f"LONG BREAKOUT {trade_qty} {symbol} | ₹{current_price:.2f} | Stop: ₹{long_stop:.2f} | Target: ₹{long_target:.2f}")
+            # Place exchange-level SL immediately (SELL trigger at long_stop)
+            sl_id = client.place_sl_order(symbol, token, "SELL", trade_qty, long_stop)
+            if sl_id:
+                _sl_orders[symbol] = sl_id
             return True
         return False
 
-    elif current_price > or_high and not vol_ok:
-        log.info(
-            f"{symbol}: price above OR high but volume too low"
-            f" ({current_volume / avg_or_volume:.2f}× < {INDIA_ORB_VOLUME_FACTOR}×) — skipping"
-        )
+    # --- Short breakout: below OR low, Nifty down ---
+    if INDIA_ALLOW_SHORTS and current_price < or_low and vol_ok and nifty_up is not True:
+        if short_target <= 0 or current_price <= short_target:
+            log.info(f"{symbol}: stale short breakout — already past target")
+            return False
+        if DRY_RUN:
+            log.info(
+                f"[DRY RUN] SELL SHORT {trade_qty} {symbol} | ₹{current_price:.2f}"
+                f" | Stop: ₹{short_stop:.2f} | Target: ₹{short_target:.2f}"
+                f" | Vol: {current_volume/avg_or_volume:.1f}×"
+            )
+            return True
+        order_id = client.place_market_order(symbol, token, "SELL", trade_qty)
+        if order_id:
+            log.info(f"SHORT BREAKOUT {trade_qty} {symbol} | ₹{current_price:.2f} | Stop: ₹{short_stop:.2f} | Target: ₹{short_target:.2f}")
+            # Place exchange-level SL immediately (BUY trigger at short_stop)
+            sl_id = client.place_sl_order(symbol, token, "BUY", trade_qty, short_stop)
+            if sl_id:
+                _sl_orders[symbol] = sl_id
+            return True
         return False
-    else:
-        log.info(f"{symbol}: no breakout (₹{current_price:.2f} vs OR high ₹{or_high:.2f})")
+
+    if not vol_ok:
+        log.info(f"{symbol}: volume too low ({current_volume/avg_or_volume:.2f}× < {INDIA_ORB_VOLUME_FACTOR}×)")
         return False
 
 
@@ -286,7 +322,10 @@ def run_india_orb() -> None:
 
     # --- EOD sweep: close everything if past close time ---
     if now.time() >= CLOSE_TIME_IST:
-        log.info(f"EOD — force-closing all open MIS positions")
+        log.info("EOD — cancelling SL orders and force-closing all open MIS positions")
+        # Cancel all live SL orders first so they don't race with our market exits
+        for sym in list(_sl_orders.keys()):
+            cancel_sl(sym)
         if not DRY_RUN:
             client.close_all_positions()
         else:
@@ -340,6 +379,9 @@ def run_india_orb() -> None:
     for symbol in active_symbols:
         if symbol in held_symbols:
             continue  # already managed above
+        if symbol in INDIA_BLOCKLIST:
+            log.debug(f"{symbol}: on blocklist — skipping")
+            continue
         token = client.resolve_token(symbol)
         if token is None:
             log.warning(f"{symbol}: skipping — could not resolve SmartAPI token")

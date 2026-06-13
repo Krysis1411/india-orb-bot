@@ -35,6 +35,7 @@ from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.trading.strategy import Strategy
 
 from config import (
+    INDIA_ALLOW_SHORTS,
     INDIA_CLOSE_HOUR,
     INDIA_CLOSE_MINUTE,
     INDIA_MAX_ENTRY_HOUR,
@@ -88,6 +89,7 @@ class IndiaORBConfig(StrategyConfig, frozen=True):
     min_or_pct: float = INDIA_ORB_MIN_OR_PCT
     nifty_bar_type: BarType | None = None  # supply to enable Nifty trend filter
     trailing_stop: bool = True             # move stop to breakeven at 0.5× target
+    allow_shorts: bool = INDIA_ALLOW_SHORTS  # trade breakouts below OR low as short sells
 
 
 # ---------------------------------------------------------------------------
@@ -185,8 +187,9 @@ class IndiaORBStrategy(Strategy):
     # ------------------------------------------------------------------
 
     def _open_position(self, bar: Bar, price: float, stop: float,
-                       target: float, qty: int) -> None:
+                       target: float, qty: int, direction: str = "long") -> None:
         self._open_trade = dict(
+            direction=direction,       # "long" or "short"
             entry_price=price,
             stop=stop,
             target=target,
@@ -205,22 +208,28 @@ class IndiaORBStrategy(Strategy):
         if self._open_trade is None:
             return
         t = self._open_trade
-        pnl = round((exit_price - t["entry_price"]) * t["qty"], 2)
-        pnl_pct = round((exit_price - t["entry_price"]) / t["entry_price"] * 100, 3)
+        # P&L direction differs for long vs short
+        if t["direction"] == "short":
+            pnl = round((t["entry_price"] - exit_price) * t["qty"], 2)
+            pnl_pct = round((t["entry_price"] - exit_price) / t["entry_price"] * 100, 3)
+        else:
+            pnl = round((exit_price - t["entry_price"]) * t["qty"], 2)
+            pnl_pct = round((exit_price - t["entry_price"]) / t["entry_price"] * 100, 3)
         self.trades.append({
-            "symbol":        str(self.config.instrument_id.symbol),
-            "entry_price":   t["entry_price"],
-            "exit_price":    exit_price,
-            "qty":           t["qty"],
-            "pnl":           pnl,
-            "pnl_pct":       pnl_pct,
-            "exit_reason":   reason,
+            "symbol":         str(self.config.instrument_id.symbol),
+            "direction":      t["direction"],
+            "entry_price":    t["entry_price"],
+            "exit_price":     exit_price,
+            "qty":            t["qty"],
+            "pnl":            pnl,
+            "pnl_pct":        pnl_pct,
+            "exit_reason":    reason,
             "entry_time_ist": t["entry_ist"],
-            "entry_weekday": t["entry_weekday"],
-            "or_range":      t["or_range"],
-            "or_range_pct":  round(t["or_range"] / t["or_high"] * 100, 3),
-            "entry_ts":      t["entry_ts"],
-            "exit_ts":       bar.ts_event,
+            "entry_weekday":  t["entry_weekday"],
+            "or_range":       t["or_range"],
+            "or_range_pct":   round(t["or_range"] / t["or_high"] * 100, 3),
+            "entry_ts":       t["entry_ts"],
+            "exit_ts":        bar.ts_event,
         })
         self._open_trade = None
 
@@ -292,47 +301,63 @@ class IndiaORBStrategy(Strategy):
 
         # ── Phase 3: manage open position ─────────────────────────────
         if self._open_trade is not None:
-            t = self._open_trade
+            t   = self._open_trade
+            is_long  = t["direction"] == "long"
+            is_short = t["direction"] == "short"
 
-            # Trailing stop: move stop to breakeven after 0.5× target
+            # Trailing stop: move stop to breakeven after 0.5× target reached
             if self.config.trailing_stop and not t["trailing_activated"]:
-                half_target = t["or_high"] + or_range * self.config.profit_multiplier * 0.5
-                if close >= half_target:
-                    t["stop"] = max(t["stop"], t["entry_price"])
-                    t["trailing_activated"] = True
+                if is_long:
+                    half_target = t["or_high"] + or_range * self.config.profit_multiplier * 0.5
+                    if close >= half_target:
+                        t["stop"] = max(t["stop"], t["entry_price"])
+                        t["trailing_activated"] = True
+                else:
+                    half_target = t["or_low"] - or_range * self.config.profit_multiplier * 0.5
+                    if close <= half_target:
+                        t["stop"] = min(t["stop"], t["entry_price"])
+                        t["trailing_activated"] = True
 
-            if close <= t["stop"]:
-                reason = "trailing_stop" if t["trailing_activated"] else "stop_loss"
-                self._exit_trade(bar, close, reason)
-            elif close >= t["target"]:
-                self._exit_trade(bar, close, "take_profit")
+            if is_long:
+                if close <= t["stop"]:
+                    self._exit_trade(bar, close, "trailing_stop" if t["trailing_activated"] else "stop_loss")
+                elif close >= t["target"]:
+                    self._exit_trade(bar, close, "take_profit")
+            else:  # short
+                if close >= t["stop"]:
+                    self._exit_trade(bar, close, "trailing_stop" if t["trailing_activated"] else "stop_loss")
+                elif close <= t["target"]:
+                    self._exit_trade(bar, close, "take_profit")
             return
 
-        # ── Phase 4: entry checks ─────────────────────────────────────
+        # ── Phase 4: entry checks (shared gates) ──────────────────────
         if self._traded:
             return
 
-        # Monday skip
         if INDIA_SKIP_MONDAY_ENTRIES and dt_ist.weekday() == 0:
             return
 
-        # Entry time cutoff
         if t_utc >= _ENTRY_CUTOFF_UTC:
             return
 
-        # Nifty trend filter
-        if self._nifty_up() is not True:
+        vol_ok = volume >= self._avg_or_vol * self.config.volume_factor
+        if not vol_ok:
             return
 
-        # Volume confirmation
-        if volume < self._avg_or_vol * self.config.volume_factor:
-            return
+        nifty = self._nifty_up()
 
-        # Already blown past target — stale breakout
-        if close >= target:
-            return
+        # ── Long breakout: price above OR high, Nifty up ──────────────
+        if close > self._or_high and nifty is not False:
+            long_stop   = self._or_low  * (1 - self.config.stop_buffer_pct)
+            long_target = self._or_high + or_range * self.config.profit_multiplier
+            if close < long_target:   # not a stale breakout
+                qty = max(1, int(self.config.position_size_inr / close))
+                self._open_position(bar, close, long_stop, long_target, qty, "long")
 
-        # ── Breakout entry ────────────────────────────────────────────
-        if close > self._or_high:
-            qty = max(1, int(self.config.position_size_inr / close))
-            self._open_position(bar, close, stop, target, qty)
+        # ── Short breakout: price below OR low, Nifty down ────────────
+        elif close < self._or_low and self.config.allow_shorts and nifty is not True:
+            short_stop   = self._or_high * (1 + self.config.stop_buffer_pct)
+            short_target = self._or_low  - or_range * self.config.profit_multiplier
+            if close > short_target and short_target > 0:   # not a stale breakout
+                qty = max(1, int(self.config.position_size_inr / close))
+                self._open_position(bar, close, short_stop, short_target, qty, "short")

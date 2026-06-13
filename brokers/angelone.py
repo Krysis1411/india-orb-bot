@@ -233,6 +233,66 @@ class AngelOneClient:
             log.error(f"{symbol}: order placement failed ({side} × {qty}) — {e}")
             return None
 
+    def place_sl_order(
+        self,
+        symbol: str,
+        token: str,
+        side: str,
+        qty: int,
+        trigger_price: float,
+        exchange: str = "NSE",
+    ) -> str | None:
+        """
+        Place an exchange-level STOPLOSS_MARKET order for an INTRADAY position.
+        Fires at the exchange the instant trigger_price is touched — no polling lag.
+
+        For a LONG position  → side="SELL", trigger_price = OR low * (1 - buffer)
+        For a SHORT position → side="BUY",  trigger_price = OR high * (1 + buffer)
+
+        Returns the SL order ID (store it to cancel later when target is hit or EOD).
+        GTT is NOT used because AngelOne GTT only supports DELIVERY/MARGIN, not INTRADAY.
+        """
+        self._ensure_connected()
+        params = {
+            "variety": "STOPLOSS",
+            "tradingsymbol": self._eq_symbol(symbol),
+            "symboltoken": token,
+            "transactiontype": side.upper(),
+            "exchange": exchange,
+            "ordertype": "STOPLOSS_MARKET",
+            "producttype": "INTRADAY",
+            "duration": "DAY",
+            "price": "0",
+            "triggerprice": str(round(trigger_price, 2)),
+            "squareoff": "0",
+            "stoploss": "0",
+            "quantity": str(qty),
+        }
+        try:
+            order_id = self._obj.placeOrder(params)
+            log.info(
+                f"SL order placed — {side} {qty} {symbol}"
+                f" trigger ₹{trigger_price:.2f} → order_id: {order_id}"
+            )
+            return str(order_id)
+        except Exception as e:
+            log.error(f"{symbol}: SL order placement failed ({side} × {qty} @ ₹{trigger_price:.2f}) — {e}")
+            return None
+
+    def cancel_order(self, order_id: str, variety: str = "STOPLOSS") -> bool:
+        """
+        Cancel a pending order (typically the SL order when target is hit or EOD).
+        Returns True if the cancel was accepted.
+        """
+        self._ensure_connected()
+        try:
+            self._obj.cancelOrder(order_id, variety)
+            log.info(f"Order cancelled — id: {order_id}")
+            return True
+        except Exception as e:
+            log.warning(f"Cancel order {order_id} failed — {e}")
+            return False
+
     # ------------------------------------------------------------------
     # Positions & account
     # ------------------------------------------------------------------
@@ -271,7 +331,7 @@ class AngelOneClient:
             return 0.0
 
     def already_traded_today(self, symbol: str) -> bool:
-        """True if a completed BUY order exists for this symbol today."""
+        """True if any completed opening order (BUY for long, SELL for short) exists today."""
         self._ensure_connected()
         eq_sym = self._eq_symbol(symbol)
         try:
@@ -280,8 +340,8 @@ class AngelOneClient:
             for o in orders:
                 if (
                     o.get("tradingsymbol") == eq_sym
-                    and o.get("transactiontype", "").upper() == "BUY"
                     and o.get("status", "").lower() in ("complete", "filled")
+                    and o.get("variety", "").upper() == "NORMAL"   # entry orders only, not SL
                 ):
                     return True
             return False
@@ -290,17 +350,19 @@ class AngelOneClient:
             return False
 
     def close_all_positions(self) -> None:
-        """Market-sell all open MIS positions (EOD sweep)."""
+        """Market-close all open MIS positions at EOD — handles both longs and shorts."""
         positions = self.get_positions()
         for pos in positions:
             qty = int(pos.get("netqty", 0))
             sym = pos.get("tradingsymbol", "")
             token = pos.get("symboltoken", "")
-            if qty > 0 and sym and token:
-                # Strip -EQ suffix for our place_market_order call
-                base_sym = sym.replace("-EQ", "").replace("-BE", "")
-                order_id = self.place_market_order(base_sym, token, "SELL", qty)
-                if order_id:
-                    log.info(f"EOD CLOSE — SELL {qty} {sym} (order {order_id})")
-                else:
-                    log.error(f"EOD CLOSE FAILED — {sym} × {qty}")
+            if qty == 0 or not sym or not token:
+                continue
+            base_sym = sym.replace("-EQ", "").replace("-BE", "")
+            close_side = "SELL" if qty > 0 else "BUY"
+            abs_qty = abs(qty)
+            order_id = self.place_market_order(base_sym, token, close_side, abs_qty)
+            if order_id:
+                log.info(f"EOD CLOSE — {close_side} {abs_qty} {sym} (order {order_id})")
+            else:
+                log.error(f"EOD CLOSE FAILED — {sym} × {abs_qty}")

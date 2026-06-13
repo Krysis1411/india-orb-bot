@@ -140,13 +140,16 @@ INDIA_CLOSE_MINUTE = 15
 
 # Capital allocation per trade (INR)
 INDIA_POSITION_SIZE_INR = 5000    # ₹5,000 per trade
-INDIA_MAX_TOTAL_INR     = 20000   # max ₹20,000 deployed at once → 4 concurrent trades
+INDIA_MAX_TOTAL_INR     = 15000   # max ₹15,000 deployed at once → 3 concurrent trades
 
 # ORB quality filters
 INDIA_ORB_MIN_OR_PCT        = 0.003  # 0.3% min OR range as % of price
-INDIA_ORB_PROFIT_MULTIPLIER = 1.5    # target = OR high + (OR range × 1.5)
+INDIA_ORB_PROFIT_MULTIPLIER = 1.5    # target = OR range × 1.5 beyond breakout level
 INDIA_ORB_VOLUME_FACTOR     = 1.0    # breakout volume must be ≥ 1× avg OR bar volume
-INDIA_ORB_STOP_BUFFER_PCT   = 0.002  # stop = OR low × (1 − 0.2%)
+INDIA_ORB_STOP_BUFFER_PCT   = 0.005  # stop = 0.5% beyond OR boundary (optimizer best result)
+
+# Directional bias — trade both breakout above AND breakout below (short selling intraday)
+INDIA_ALLOW_SHORTS = True
 
 # Entry quality filters
 INDIA_SKIP_MONDAY_ENTRIES = True   # Mondays tend to have noisier OR in India too
@@ -157,17 +160,31 @@ INDIA_MAX_ENTRY_MINUTE    = 0      # no new entries after 13:00 IST
 INDIA_DAILY_LOSS_LIMIT_PCT = 0.05  # stop new entries if day P&L < -5%
 
 # Number of NSE symbols to scan each cycle
-INDIA_SCREENER_LIMIT = 15
+INDIA_SCREENER_LIMIT = 10
 
-# Static fallback symbol list (Nifty 50 core + high-beta movers)
+# Backtest-validated symbol list — only symbols with positive P&L in backtesting.
+# Ranked by total P&L (58 trading days, ₹5,000/trade, long-only baseline):
+#   SUNPHARMA  67% win  +₹121  maxDD ₹34    ← tightest drawdown
+#   ADANIENT   50% win  +₹147  maxDD ₹105   ← best return
+#   JSWSTEEL   47% win  +₹101  maxDD ₹144
+#   POWERGRID  56% win  +₹75   maxDD ₹82
+#   HCLTECH    40% win  +₹73   maxDD ₹154
+#   BAJFINANCE 50% win  +₹72   maxDD ₹133
+#   ONGC       38% win  +₹67   maxDD ₹129
+#   RELIANCE   41% win  +₹56   maxDD ₹57    ← lowest drawdown in class
+#   BHARTIARTL 47% win  +₹15   maxDD ₹86
 INDIA_SYMBOLS = [
-    # Nifty 50 blue-chips — highest liquidity, reliable ORB setups
-    "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK",
-    "HINDUNILVR", "BAJFINANCE", "KOTAKBANK", "LT", "ITC",
-    "WIPRO", "HCLTECH", "AXISBANK", "TITAN", "MARUTI",
-    "SUNPHARMA", "BHARTIARTL", "SBIN", "ADANIENT", "POWERGRID",
-    # High-beta / active movers — stronger intraday range
-    "TATAMOTORS", "TATASTEEL", "JSWSTEEL", "ONGC", "NTPC",
-    "ZOMATO", "IRCTC", "DMART", "HDFCLIFE", "PIDILITIND",
+    "SUNPHARMA", "ADANIENT", "JSWSTEEL", "POWERGRID", "HCLTECH",
+    "BAJFINANCE", "ONGC", "RELIANCE", "BHARTIARTL",
+]
+
+# Symbols proven to lose money on ORB — never trade these.
+# Backtest losses: MARUTI -₹408 | DMART -₹340 | TITAN -₹234 | INFY -₹170
+#                  NTPC -₹167  | SBIN -₹123  | ICICIBANK -₹114 | KOTAKBANK -₹106
+#                  WIPRO -₹66  | HDFCLIFE -₹66 | IRCTC -₹71   | TCS -₹98 (18% win!)
+INDIA_BLOCKLIST = [
+    "MARUTI", "DMART", "TITAN", "INFY", "NTPC", "TCS",
+    "SBIN", "ICICIBANK", "KOTAKBANK", "WIPRO", "HDFCLIFE",
+    "ITC", "IRCTC", "HINDUNILVR", "LT", "HDFCBANK",
 ]
 
