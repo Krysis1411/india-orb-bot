@@ -207,7 +207,7 @@ class AngelOneClient:
             "transactiontype": side.upper(),
             "exchange": exchange,
             "ordertype": "MARKET",
-            "producttype": "MIS",
+            "producttype": "INTRADAY",  # SmartAPI term for intraday; auto-squared at 15:20 IST
             "duration": "DAY",
             "price": "0",
             "squareoff": "0",
@@ -227,12 +227,16 @@ class AngelOneClient:
     # ------------------------------------------------------------------
 
     def get_positions(self) -> list[dict]:
-        """Return list of open MIS positions (netqty != 0)."""
+        """Return list of open INTRADAY positions (netqty != 0)."""
         self._ensure_connected()
         try:
             resp = self._obj.position()
             all_pos = resp.get("data") or []
-            return [p for p in all_pos if int(p.get("netqty", 0)) != 0]
+            return [
+                p for p in all_pos
+                if int(p.get("netqty", 0)) != 0
+                and p.get("producttype", "").upper() in ("INTRADAY", "MIS")
+            ]
         except Exception as e:
             log.error(f"get_positions failed: {e}")
             return []
