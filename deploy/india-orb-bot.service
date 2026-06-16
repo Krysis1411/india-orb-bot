@@ -1,0 +1,17 @@
+[Unit]
+Description=India ORB Bot (AngelOne SmartAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO_DIR__
+ExecStart=__REPO_DIR__/venv/bin/python india_orb_bot.py --dry-run
+Restart=on-failure
+RestartSec=60
+StartLimitIntervalSec=3600
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

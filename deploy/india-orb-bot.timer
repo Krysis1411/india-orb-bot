@@ -1,0 +1,12 @@
+[Unit]
+Description=Start India ORB Bot every weekday before market open
+
+[Timer]
+# Server timezone is set to Asia/Kolkata by setup_vps.sh, so this is 08:50 IST —
+# 25 min before NSE open (09:15), giving time for boot/auth before the bot's
+# own pre-market wait loop takes over.
+OnCalendar=Mon..Fri 08:50:00
+Persistent=false
+
+[Install]
+WantedBy=timers.target
