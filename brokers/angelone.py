@@ -180,16 +180,9 @@ class AngelOneClient:
         Return (is_up, pct_change) for Nifty 50 today.
         Uses today's first bar open vs. latest bar close.
         Returns (None, 0.0) if data is unavailable.
-
-        Resolves the Nifty 50 token dynamically via searchScrip so it stays
-        correct even if AngelOne changes the well-known token (99926000).
         """
-        # Try to resolve token via search; fall back to stable hardcoded token
-        token = self.resolve_token(_NIFTY50_SEARCH_TERM, exchange="NSE")
-        if token is None:
-            log.debug(f"Nifty50 token search failed — using fallback {_NIFTY50_FALLBACK_TOKEN}")
-            token = _NIFTY50_FALLBACK_TOKEN
-
+        # Use hardcoded stable token directly — searchScrip always fails for "Nifty 50"
+        token = _NIFTY50_FALLBACK_TOKEN
         df = self.get_today_candles(_NIFTY50_SEARCH_TERM, token, exchange="NSE")
         if df is None or df.empty:
             return None, 0.0
