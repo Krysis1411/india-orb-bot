@@ -8,17 +8,26 @@ stop_buffer_pct and profit_multiplier before going live.
 
 Usage
 -----
-    # Single symbol — detailed trade log
+    # Single symbol — detailed trade log + full statistics
     python -m backtest.run_india_orb_backtest RELIANCE
 
     # Full ranking across all INDIA_SYMBOLS
     python -m backtest.run_india_orb_backtest --rank
 
+    # Portfolio simulation: ₹15k budget cap (max 3 concurrent positions)
+    python -m backtest.run_india_orb_backtest --portfolio
+
+    # Walk-forward validation: 67/33 train/test split + overfitting check
+    python -m backtest.run_india_orb_backtest --walkforward
+
     # Parameter sweep to find best stop/target settings
     python -m backtest.run_india_orb_backtest --optimize
 
-    # Fetch/refresh NSE data first, then rank
-    python -m backtest.run_india_orb_backtest --fetch --rank
+    # Fetch/refresh NSE data first, then run portfolio sim
+    python -m backtest.run_india_orb_backtest --fetch --portfolio
+
+    # Run on full NSE_UNIVERSE (45 symbols)
+    python -m backtest.run_india_orb_backtest --universe --portfolio
 """
 import sys
 from pathlib import Path
@@ -41,6 +50,7 @@ from zoneinfo import ZoneInfo
 
 from backtest.fetch_nse_data import fetch_nse_bars, load_nse_bars_df
 from config import (
+    INDIA_ORB_BREAKOUT_STRENGTH_PCT,
     INDIA_ORB_PROFIT_MULTIPLIER,
     INDIA_ORB_RANGE_BARS,
     INDIA_ORB_STOP_BUFFER_PCT,
@@ -104,6 +114,9 @@ def _run_engine(
     min_or_pct: float = INDIA_ORB_MIN_OR_PCT,
     volume_factor: float = INDIA_ORB_VOLUME_FACTOR,
     trailing_stop: bool = True,
+    breakout_strength_pct: float = INDIA_ORB_BREAKOUT_STRENGTH_PCT,
+    date_from: str | None = None,
+    date_to: str | None = None,
 ) -> tuple[list[dict], str | None]:
     """Run one backtest engine pass for a single symbol. Returns (trades, error)."""
     try:
@@ -112,6 +125,10 @@ def _run_engine(
         if not path.exists():
             path = fetch_nse_bars(symbol, DATA_DIR)
         df = load_nse_bars_df(path)
+        if date_from:
+            df = df[df.index >= pd.Timestamp(date_from, tz="UTC")]
+        if date_to:
+            df = df[df.index < pd.Timestamp(date_to, tz="UTC")]
         df = df.between_time("03:45", "10:00")   # NSE hours in UTC
         if len(df) < 50:
             return [], f"only {len(df)} bars after filtering"
@@ -154,6 +171,7 @@ def _run_engine(
                 min_or_pct=min_or_pct,
                 nifty_bar_type=nifty_bar_type_arg,
                 trailing_stop=trailing_stop,
+                breakout_strength_pct=breakout_strength_pct,
             )
         )
         engine.add_strategy(strategy)
@@ -200,6 +218,113 @@ def _summarize(symbol: str, trades: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Full statistics
+# ---------------------------------------------------------------------------
+
+def _full_stats(trades: list[dict]) -> dict:
+    """
+    Comprehensive strategy statistics:
+    Sharpe (annualised), profit factor, expectancy, Wilson 95% CI on win rate,
+    max consecutive losses, max drawdown.
+    """
+    import math
+    import statistics as _stats
+    from collections import defaultdict
+
+    pnls = [t["pnl"] for t in trades]
+    n = len(pnls)
+    if n == 0:
+        return {}
+
+    wins   = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    p_win  = len(wins) / n
+
+    # Wilson score 95% confidence interval
+    z      = 1.96
+    denom  = 1 + z ** 2 / n
+    center = p_win + z ** 2 / (2 * n)
+    margin = z * math.sqrt(p_win * (1 - p_win) / n + z ** 2 / (4 * n ** 2))
+    ci_lo  = max(0.0, (center - margin) / denom * 100)
+    ci_hi  = min(100.0, (center + margin) / denom * 100)
+
+    gross_wins   = sum(wins)
+    gross_losses = abs(sum(losses))
+    profit_factor = gross_wins / (gross_losses or 0.001)
+    avg_win  = gross_wins  / len(wins)   if wins   else 0.0
+    avg_loss = gross_losses / len(losses) if losses else 0.0
+    expectancy = p_win * avg_win - (1 - p_win) * avg_loss
+
+    # Annualised Sharpe via daily P&L grouping (pandas already imported)
+    daily_pnl: dict = defaultdict(float)
+    for t in trades:
+        day = pd.Timestamp(t["entry_ts"], unit="ns", tz="UTC").tz_convert(IST).date()
+        daily_pnl[day] += t["pnl"]
+    daily_pnls = list(daily_pnl.values())
+    if len(daily_pnls) > 1:
+        mean_d = _stats.mean(daily_pnls)
+        std_d  = _stats.stdev(daily_pnls)
+        sharpe = (mean_d / std_d * math.sqrt(252)) if std_d > 0 else 0.0
+    else:
+        sharpe = 0.0
+
+    # Max consecutive losses
+    max_cl, cur_cl = 0, 0
+    for p in pnls:
+        if p <= 0:
+            cur_cl += 1
+            max_cl = max(max_cl, cur_cl)
+        else:
+            cur_cl = 0
+
+    # Max drawdown
+    cumsum, peak, max_dd = 0.0, 0.0, 0.0
+    for p in pnls:
+        cumsum += p
+        peak    = max(peak, cumsum)
+        max_dd  = max(max_dd, peak - cumsum)
+
+    return dict(
+        n=n,
+        wins=len(wins),
+        losses=len(losses),
+        win_rate=round(p_win * 100, 1),
+        ci_lo=round(ci_lo, 1),
+        ci_hi=round(ci_hi, 1),
+        profit_factor=round(profit_factor, 2),
+        avg_win=round(avg_win, 2),
+        avg_loss=round(avg_loss, 2),
+        expectancy=round(expectancy, 2),
+        sharpe=round(sharpe, 2),
+        total_pnl=round(sum(pnls), 2),
+        avg_pnl=round(sum(pnls) / n, 2),
+        max_dd=round(max_dd, 2),
+        max_consec_losses=max_cl,
+    )
+
+
+def _print_full_stats(stats: dict, label: str = "Portfolio") -> None:
+    """Print _full_stats() result as a readable table."""
+    if not stats:
+        print("  No trades.")
+        return
+    print(f"\n  ── {label} Statistics ─────────────────────────────────────────")
+    print(f"  Trades              : {stats['n']}")
+    print(f"  Win rate            : {stats['win_rate']:.1f}%"
+          f"  (95% CI: {stats['ci_lo']:.1f}%–{stats['ci_hi']:.1f}%)")
+    print(f"  Profit factor       : {stats['profit_factor']:.2f}"
+          f"  (edge if > 1.0, strong if > 1.5)")
+    print(f"  Expectancy / trade  : ₹{stats['expectancy']:+,.2f}")
+    print(f"  Avg win / avg loss  : ₹{stats['avg_win']:+,.2f}  /  ₹{-stats['avg_loss']:+,.2f}")
+    print(f"  Sharpe (annualised) : {stats['sharpe']:.2f}"
+          f"  (>1.0 good, >2.0 excellent)")
+    print(f"  Max consec losses   : {stats['max_consec_losses']}")
+    print(f"  Max drawdown        : ₹{stats['max_dd']:,.2f}")
+    print(f"  Total P&L           : ₹{stats['total_pnl']:+,.2f}")
+    print(f"  ──────────────────────────────────────────────────────────────")
+
+
+# ---------------------------------------------------------------------------
 # Single-symbol detailed output
 # ---------------------------------------------------------------------------
 
@@ -240,6 +365,8 @@ def run_single(symbol: str, nifty_bars) -> None:
     print(f"\n  Trades: {s['trades']}  |  Wins: {s['wins']}  |  Win%: {s['win_rate']:.0f}%  |"
           f"  Total P&L: ₹{s['total_pnl']:+,.2f}  |  Avg: ₹{s['avg_pnl']:+,.2f}"
           f"  |  Max DD: ₹{s['max_dd']:,.2f}")
+
+    _print_full_stats(_full_stats(trades), label=symbol)
 
     # --- Day-of-week breakdown ---
     _print_dow_breakdown(trades)
@@ -399,6 +526,257 @@ def run_ranking(symbols: list[str], nifty_bars, label: str | None = None) -> Non
 
 
 # ---------------------------------------------------------------------------
+# Portfolio simulation (₹15k budget cap = max 3 concurrent positions)
+# ---------------------------------------------------------------------------
+
+def run_portfolio(
+    symbols: list[str],
+    nifty_bars,
+    max_positions: int = 3,
+    label: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    stop_buffer_pct: float = INDIA_ORB_STOP_BUFFER_PCT,
+    profit_multiplier: float = INDIA_ORB_PROFIT_MULTIPLIER,
+    breakout_strength_pct: float = 0.0,
+) -> list[dict]:
+    """
+    Simulate a ₹15k budget cap across all symbols.
+
+    Collects every trade from every symbol, sorts them chronologically,
+    and accepts a trade only if fewer than max_positions are currently open.
+    This mirrors the real bot: ₹5k × 3 slots = ₹15k deployed at most.
+    Returns the list of budget-constrained accepted trades.
+    """
+    RESULTS_DIR.mkdir(exist_ok=True)
+    suffix = f" [{label}]" if label else ""
+    print(f"\nPortfolio Simulation{suffix} — {len(symbols)} symbols, max {max_positions} concurrent")
+    bud = INDIA_POSITION_SIZE_INR * max_positions
+    print(f"  ₹{INDIA_POSITION_SIZE_INR:,}/trade × {max_positions} slots = ₹{bud:,} budget cap")
+    print(f"  stop={stop_buffer_pct:.1%}  mult={profit_multiplier:.1f}×  breakout={breakout_strength_pct:.2%}\n")
+
+    all_trades: list[dict] = []
+    for i, sym in enumerate(symbols, 1):
+        print(f"  [{i:>2}/{len(symbols)}] {sym:<12}", end="  ", flush=True)
+        trades, err = _run_engine(
+            sym, nifty_bars,
+            stop_buffer_pct=stop_buffer_pct,
+            profit_multiplier=profit_multiplier,
+            breakout_strength_pct=breakout_strength_pct,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        if err:
+            print(f"ERROR: {err}")
+            continue
+        print(f"{len(trades)} trades")
+        all_trades.extend(trades)
+
+    if not all_trades:
+        print("\n  No trades collected.")
+        return []
+
+    # Chronological budget simulation
+    all_trades.sort(key=lambda t: t["entry_ts"])
+    open_exits: list[int] = []   # exit_ts of currently open positions
+    accepted: list[dict] = []
+    rejected = 0
+
+    for t in all_trades:
+        open_exits = [ex for ex in open_exits if ex > t["entry_ts"]]
+        if len(open_exits) < max_positions:
+            accepted.append(t)
+            open_exits.append(t["exit_ts"])
+        else:
+            rejected += 1
+
+    print(f"\n  Accepted {len(accepted)} / {len(all_trades)} trades  "
+          f"(rejected {rejected} — budget full)\n")
+
+    # Per-symbol accepted breakdown
+    sym_pnls: dict[str, list] = {}
+    for t in accepted:
+        sym_pnls.setdefault(t["symbol"], []).append(t["pnl"])
+
+    print(f"  {'Symbol':<14} {'Taken':>5} {'Win%':>6} {'Total P&L':>12}")
+    print(f"  {'-'*42}")
+    for sym in sorted(sym_pnls, key=lambda s: sum(sym_pnls[s]), reverse=True):
+        pnls = sym_pnls[sym]
+        wins = sum(1 for p in pnls if p > 0)
+        print(f"  {sym:<14} {len(pnls):>5} {wins/len(pnls)*100:>5.0f}%"
+              f"  ₹{sum(pnls):>+10,.0f}")
+
+    _print_full_stats(_full_stats(accepted),
+                      label=f"Portfolio{' '+label if label else ''}")
+    _print_dow_breakdown(accepted)
+    _print_time_breakdown(accepted)
+    return accepted
+
+
+# ---------------------------------------------------------------------------
+# Walk-forward validation (67% train / 33% test, chronological split)
+# ---------------------------------------------------------------------------
+
+def run_walkforward(
+    symbols: list[str],
+    nifty_bars,
+    train_pct: float = 0.67,
+) -> None:
+    """
+    Chronological walk-forward:
+    1. Find date range across all available parquet files.
+    2. Split train_pct / (1-train_pct) at the boundary date.
+    3. Grid-search stop × mult × breakout on training period.
+    4. Validate best params on out-of-sample test period (portfolio-constrained).
+    5. Print IS vs OOS comparison and overfitting verdict.
+    """
+    # Find data date range
+    date_min: pd.Timestamp | None = None
+    date_max: pd.Timestamp | None = None
+    for sym in symbols:
+        path = DATA_DIR / f"{sym}_NSE_5m.parquet"
+        if not path.exists():
+            continue
+        try:
+            df = load_nse_bars_df(path)
+            if df.empty:
+                continue
+            lo, hi = df.index.min(), df.index.max()
+            date_min = lo if date_min is None else min(date_min, lo)
+            date_max = hi if date_max is None else max(date_max, hi)
+        except Exception:
+            pass
+
+    if date_min is None or date_max is None:
+        print("\n  Walk-forward: no parquet data found.")
+        return
+
+    total_days = (date_max - date_min).days
+    split_ts   = date_min + pd.Timedelta(days=int(total_days * train_pct))
+    s0 = date_min.strftime("%Y-%m-%d")
+    s1 = split_ts.strftime("%Y-%m-%d")
+    s2 = (date_max + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+    print(f"\nWalk-Forward Validation")
+    print(f"  Data  : {s0} → {date_max.strftime('%Y-%m-%d')}")
+    print(f"  Train : {s0} → {s1}  ({train_pct:.0%})")
+    print(f"  Test  : {s1} → {s2}  ({1-train_pct:.0%})")
+    print(f"  Syms  : {len(symbols)}")
+
+    stop_grid   = [0.005, 0.010, 0.015, 0.020]
+    target_grid = [1.0, 1.5, 2.0, 2.5]
+    bkst_grid   = [0.0, 0.001, 0.002]
+    total_runs  = len(stop_grid) * len(target_grid) * len(bkst_grid) * len(symbols)
+
+    print(f"\n  ── Training phase ({len(stop_grid)}×{len(target_grid)}×{len(bkst_grid)} grid"
+          f" × {len(symbols)} syms = {total_runs} runs) ──\n")
+
+    best_pnl    = float("-inf")
+    best_params: dict = {}
+
+    for stop in stop_grid:
+        for mult in target_grid:
+            for bkst in bkst_grid:
+                pnl_sum, n_sum, win_sum = 0.0, 0, 0
+                for sym in symbols:
+                    trades, _ = _run_engine(
+                        sym, nifty_bars,
+                        stop_buffer_pct=stop,
+                        profit_multiplier=mult,
+                        breakout_strength_pct=bkst,
+                        date_from=s0,
+                        date_to=s1,
+                    )
+                    if not trades:
+                        continue
+                    pnl_sum += sum(t["pnl"] for t in trades)
+                    n_sum   += len(trades)
+                    win_sum += sum(1 for t in trades if t["pnl"] > 0)
+
+                if n_sum < 5:
+                    continue
+                marker = ""
+                if pnl_sum > best_pnl:
+                    best_pnl    = pnl_sum
+                    best_params = dict(stop=stop, mult=mult, bkst=bkst)
+                    marker = "  ◀ BEST"
+                print(f"    stop={stop:.1%}  mult={mult:.1f}×  bkst={bkst:.2%}"
+                      f"  n={n_sum:>4}  win%={win_sum/n_sum*100:>5.1f}%"
+                      f"  pnl=₹{pnl_sum:>+10,.0f}{marker}")
+
+    if not best_params:
+        print("\n  No valid combinations in training period.")
+        return
+
+    print(f"\n  Best → stop={best_params['stop']:.1%}  mult={best_params['mult']:.1f}×"
+          f"  bkst={best_params['bkst']:.2%}  IS P&L=₹{best_pnl:+,.0f}")
+
+    # Full training stats with best params (all trades, no budget filter)
+    train_all: list[dict] = []
+    for sym in symbols:
+        trades, _ = _run_engine(
+            sym, nifty_bars,
+            stop_buffer_pct=best_params["stop"],
+            profit_multiplier=best_params["mult"],
+            breakout_strength_pct=best_params["bkst"],
+            date_from=s0,
+            date_to=s1,
+        )
+        train_all.extend(trades)
+    train_stats = _full_stats(train_all)
+
+    # OOS test — portfolio-constrained (realistic)
+    print(f"\n  ── Test phase (out-of-sample) ──")
+    test_accepted = run_portfolio(
+        symbols, nifty_bars,
+        label="OOS test",
+        date_from=s1,
+        date_to=s2,
+        stop_buffer_pct=best_params["stop"],
+        profit_multiplier=best_params["mult"],
+        breakout_strength_pct=best_params["bkst"],
+    )
+    test_stats = _full_stats(test_accepted)
+
+    # IS vs OOS comparison table
+    print(f"\n  ── In-sample vs Out-of-sample ────────────────────────────────")
+    print(f"  {'Metric':<24} {'In-sample (train)':>18} {'Out-of-sample':>15}")
+    print(f"  {'-'*60}")
+    _CMP = [
+        ("Trades",          "n",                  "d"),
+        ("Win rate %",      "win_rate",            ".1f"),
+        ("Profit factor",   "profit_factor",       ".2f"),
+        ("Expectancy ₹",    "expectancy",          "+.2f"),
+        ("Sharpe",          "sharpe",              ".2f"),
+        ("Total P&L ₹",     "total_pnl",           "+,.0f"),
+        ("Max DD ₹",        "max_dd",              ",.0f"),
+        ("Max consec loss", "max_consec_losses",   "d"),
+    ]
+    for lbl, key, fmt in _CMP:
+        tv = train_stats.get(key, 0)
+        ov = test_stats.get(key, 0)
+        try:
+            print(f"  {lbl:<24} {format(tv, fmt):>18} {format(ov, fmt):>15}")
+        except Exception:
+            print(f"  {lbl:<24} {tv!s:>18} {ov!s:>15}")
+
+    oos_pf  = test_stats.get("profit_factor", 0)
+    oos_pnl = test_stats.get("total_pnl", 0)
+    if oos_pf >= 1.2 and oos_pnl > 0:
+        verdict = "PASS — strategy generalises well to unseen data"
+    elif oos_pnl > 0:
+        verdict = "CAUTION — OOS profitable but weaker than IS (mild overfit)"
+    else:
+        verdict = "FAIL — strategy does NOT generalise (overfit to training data)"
+
+    print(f"\n  Verdict: {verdict}")
+    print(f"\n  Suggested config.py (validated on {s1} → {s2}):")
+    print(f"     INDIA_ORB_STOP_BUFFER_PCT        = {best_params['stop']}")
+    print(f"     INDIA_ORB_PROFIT_MULTIPLIER      = {best_params['mult']}")
+    print(f"     INDIA_ORB_BREAKOUT_STRENGTH_PCT  = {best_params['bkst']}")
+
+
+# ---------------------------------------------------------------------------
 # Parameter optimization
 # ---------------------------------------------------------------------------
 
@@ -536,6 +914,14 @@ if __name__ == "__main__":
         syms = [a for a in args if not a.startswith("--")] or default_syms
         label = "universe" if use_universe else None
         run_ranking(syms, nifty, label=label)
+
+    elif "--portfolio" in args:
+        syms = [a for a in args if not a.startswith("--")] or default_syms
+        run_portfolio(syms, nifty, breakout_strength_pct=INDIA_ORB_BREAKOUT_STRENGTH_PCT)
+
+    elif "--walkforward" in args:
+        syms = [a for a in args if not a.startswith("--")] or default_syms
+        run_walkforward(syms, nifty)
 
     else:
         syms = [a for a in args if not a.startswith("--")] or ["RELIANCE"]

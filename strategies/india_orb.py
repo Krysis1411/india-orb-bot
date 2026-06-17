@@ -92,6 +92,7 @@ class IndiaORBConfig(StrategyConfig, frozen=True):
     nifty_bar_type: BarType | None = None  # supply to enable Nifty trend filter
     trailing_stop: bool = True             # move stop to breakeven at 0.5× target
     allow_shorts: bool = INDIA_ALLOW_SHORTS  # trade breakouts below OR low as short sells
+    breakout_strength_pct: float = 0.0    # min % price must clear OR boundary before entry
 
 
 # ---------------------------------------------------------------------------
@@ -352,8 +353,11 @@ class IndiaORBStrategy(Strategy):
 
         nifty = self._nifty_up()
 
+        min_strength = self.config.breakout_strength_pct
+
         # ── Long breakout: price above OR high, Nifty up ──────────────
-        if close > self._or_high and nifty is not False:
+        long_strength = (close - self._or_high) / self._or_high if self._or_high > 0 else 0
+        if close > self._or_high and long_strength >= min_strength and nifty is not False:
             long_stop   = self._or_low  * (1 - self.config.stop_buffer_pct)
             long_target = self._or_high + or_range * self.config.profit_multiplier
             if close < long_target:   # not a stale breakout
@@ -362,8 +366,10 @@ class IndiaORBStrategy(Strategy):
 
         # ── Short breakout: price below OR low, Nifty down ────────────
         elif close < self._or_low and self.config.allow_shorts and nifty is not True:
-            short_stop   = self._or_high * (1 + self.config.stop_buffer_pct)
-            short_target = self._or_low  - or_range * self.config.profit_multiplier
-            if close > short_target and short_target > 0:   # not a stale breakout
-                qty = max(1, int(self.config.position_size_inr / close))
-                self._open_position(bar, close, short_stop, short_target, qty, "short")
+            short_strength = (self._or_low - close) / self._or_low if self._or_low > 0 else 0
+            if short_strength >= min_strength:
+                short_stop   = self._or_high * (1 + self.config.stop_buffer_pct)
+                short_target = self._or_low  - or_range * self.config.profit_multiplier
+                if close > short_target and short_target > 0:   # not a stale breakout
+                    qty = max(1, int(self.config.position_size_inr / close))
+                    self._open_position(bar, close, short_stop, short_target, qty, "short")

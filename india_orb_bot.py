@@ -20,10 +20,13 @@ Usage
     python india_orb_bot.py --once       # single check and exit (testing)
     python india_orb_bot.py --dry-run    # log all decisions, place NO real orders
 """
+import json
 import logging
+import logging.handlers
 import os
 import time as _time
 from datetime import datetime, time
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -38,6 +41,7 @@ from config import (
     INDIA_MAX_ENTRY_HOUR,
     INDIA_MAX_ENTRY_MINUTE,
     INDIA_MAX_TOTAL_INR,
+    INDIA_ORB_BREAKOUT_STRENGTH_PCT,
     INDIA_ORB_MAX_OR_PCT,
     INDIA_ORB_MIN_OR_PCT,
     INDIA_ORB_PROFIT_MULTIPLIER,
@@ -58,15 +62,35 @@ DRY_RUN = False  # Overridden to True by --dry-run CLI flag
 # Exchange-level STOPLOSS_MARKET orders protect the position without polling.
 _sl_orders: dict[str, str] = {}
 
+# Trailing stop state: symbol → True once stop has been moved to breakeven.
+# Reset each session (dict is empty at startup).
+_trailing_activated: dict[str, bool] = {}
+
+# Session-start equity — set once at startup for daily P&L tracking.
+_session_start_equity: float = 0.0
+
 # Populated once at startup by the pre-market screener.
 # Maps symbol → SmartAPI token for today's watchlist.
 # Fixed for the whole session — screener does not re-run mid-day.
 today_tokens: dict[str, str] = {}
 
+# ---------------------------------------------------------------------------
+# Logging — console + rotating daily file under logs/
+# ---------------------------------------------------------------------------
+_LOG_DIR = Path(__file__).parent / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
+_today_label = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y%m%d")
+_file_handler = logging.FileHandler(
+    _LOG_DIR / f"india_orb_{_today_label}.log", encoding="utf-8"
+)
+_file_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+logging.getLogger().addHandler(_file_handler)
+
 log = logging.getLogger(__name__)
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -217,6 +241,7 @@ def process_symbol(
             # For TAKE PROFIT: cancel SL order then exit at market
             # For STOP LOSS:   the SL order already fired at exchange; just clean up
             cancel_sl(symbol)
+            _trailing_activated.pop(symbol, None)
             if DRY_RUN:
                 log.info(f"[DRY RUN] {reason} — {close_side} {abs_qty} {symbol} at ~₹{current_price:.2f} | P&L: {pnl_pct:+.2f}%")
             elif hit_target:
@@ -226,11 +251,41 @@ def process_symbol(
                 log.info(f"{reason} — exchange SL order fired for {symbol} | P&L: {pnl_pct:+.2f}%")
             return False
 
+        # --- Trailing stop: move SL to breakeven once price clears 0.5× target ---
+        if not _trailing_activated.get(symbol, False):
+            if is_long:
+                half_target = or_high + or_range * INDIA_ORB_PROFIT_MULTIPLIER * 0.5
+                if current_price >= half_target:
+                    _trailing_activated[symbol] = True
+                    cancel_sl(symbol)  # cancel original stop
+                    be_price = avg_price
+                    if DRY_RUN:
+                        log.info(f"[DRY RUN] {symbol}: trailing stop — SL moved to breakeven ₹{be_price:.2f}")
+                    else:
+                        new_sl = client.place_sl_order(symbol, token, "SELL", abs_qty, be_price)
+                        if new_sl:
+                            _sl_orders[symbol] = new_sl
+                        log.info(f"{symbol}: trailing stop — SL moved to breakeven ₹{be_price:.2f}")
+            else:  # short
+                half_target = or_low - or_range * INDIA_ORB_PROFIT_MULTIPLIER * 0.5
+                if current_price <= half_target:
+                    _trailing_activated[symbol] = True
+                    cancel_sl(symbol)
+                    be_price = avg_price
+                    if DRY_RUN:
+                        log.info(f"[DRY RUN] {symbol}: trailing stop — SL moved to breakeven ₹{be_price:.2f}")
+                    else:
+                        new_sl = client.place_sl_order(symbol, token, "BUY", abs_qty, be_price)
+                        if new_sl:
+                            _sl_orders[symbol] = new_sl
+                        log.info(f"{symbol}: trailing stop — SL moved to breakeven ₹{be_price:.2f}")
+
+        trailing_label = " [trailing]" if _trailing_activated.get(symbol) else ""
         direction_label = "LONG" if is_long else "SHORT"
         log.info(
             f"{symbol} | {direction_label} {abs_qty} @ ₹{avg_price:.2f}"
             f" | P&L: {pnl_pct:+.2f}%"
-            f" | Stop: ₹{long_stop if is_long else short_stop:.2f}"
+            f" | Stop: ₹{long_stop if is_long else short_stop:.2f}{trailing_label}"
             f" | Target: ₹{long_target if is_long else short_target:.2f}"
         )
         return False
@@ -258,7 +313,9 @@ def process_symbol(
         return False
 
     # --- Long breakout: above OR high, Nifty up ---
-    if current_price > or_high and vol_ok and nifty_up is not False:
+    long_strength = (current_price - or_high) / or_high if or_high > 0 else 0.0
+    if (current_price > or_high and long_strength >= INDIA_ORB_BREAKOUT_STRENGTH_PCT
+            and vol_ok and nifty_up is not False):
         if current_price >= long_target:
             log.info(f"{symbol}: stale long breakout — already past target")
             return False
@@ -284,7 +341,10 @@ def process_symbol(
         return False
 
     # --- Short breakout: below OR low, Nifty down ---
-    if INDIA_ALLOW_SHORTS and current_price < or_low and vol_ok and nifty_up is not True:
+    short_strength = (or_low - current_price) / or_low if or_low > 0 else 0.0
+    if (INDIA_ALLOW_SHORTS and current_price < or_low
+            and short_strength >= INDIA_ORB_BREAKOUT_STRENGTH_PCT
+            and vol_ok and nifty_up is not True):
         if short_target <= 0 or current_price <= short_target:
             log.info(f"{symbol}: stale short breakout — already past target")
             return False
@@ -326,11 +386,19 @@ def run_india_orb() -> None:
     _block_new_entries = False
     try:
         funds = client.get_available_funds_inr()
-        # AngelOne doesn't expose yesterday's equity directly; use a simple absolute cap check.
-        # For a proper daily-loss check, compare against a session-start snapshot stored externally.
         if funds <= 0:
             log.warning("Zero available funds — blocking new entries")
             _block_new_entries = True
+        elif _session_start_equity > 0:
+            daily_loss = _session_start_equity - funds
+            daily_loss_pct = daily_loss / _session_start_equity
+            if daily_loss_pct > INDIA_DAILY_LOSS_LIMIT_PCT:
+                log.warning(
+                    f"Daily loss limit hit — down ₹{daily_loss:,.0f}"
+                    f" ({daily_loss_pct:.1%} > {INDIA_DAILY_LOSS_LIMIT_PCT:.0%})"
+                    f" — blocking new entries for rest of session"
+                )
+                _block_new_entries = True
     except Exception:
         pass
 
@@ -438,6 +506,15 @@ if __name__ == "__main__":
     if not client.connect():
         log.error("AngelOne authentication failed — check credentials in .env")
         raise SystemExit(1)
+
+    # Snapshot starting equity for daily P&L circuit-breaker
+    global _session_start_equity
+    _session_start_equity = client.get_available_funds_inr()
+    log.info(
+        f"Session start equity: ₹{_session_start_equity:,.2f}"
+        f"  |  Daily loss limit: ₹{_session_start_equity * INDIA_DAILY_LOSS_LIMIT_PCT:,.0f}"
+        f" ({INDIA_DAILY_LOSS_LIMIT_PCT:.0%})"
+    )
 
     # Run pre-market screener once — picks today's symbols by prev-day turnover
     log.info("Running pre-market screener (yfinance, ~10s)...")
