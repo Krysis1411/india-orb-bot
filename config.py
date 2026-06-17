@@ -167,19 +167,20 @@ INDIA_DAILY_LOSS_LIMIT_PCT = 0.05  # stop new entries if day P&L < -5%
 INDIA_SCREENER_LIMIT = 15
 
 # Backtested shortlist — used as FALLBACK when the live screener fails.
-# Ranked by total P&L (bidirectional, 0.5% stop, 1.5× target, 2% OR cap):
-#   ONGC       58.8% win  +₹327  maxDD ₹31    ← best win rate
-#   HCLTECH    47.8% win  +₹271  maxDD ₹172
-#   BAJFINANCE 43.5% win  +₹218  maxDD ₹205
-#   JSWSTEEL   45.8% win  +₹193  maxDD ₹134
-#   ADANIENT   50.0% win  +₹183  maxDD ₹79
-#   SUNPHARMA  59.1% win  +₹169  maxDD ₹101
-#   POWERGRID  45.0% win  +₹143  maxDD ₹100
-#   RELIANCE   41.2% win  +₹90   maxDD ₹114
-#   BHARTIARTL removed — only losing symbol (-₹35 across 31 trades)
+# Full-universe NautilusTrader backtest (45 symbols, 60 trading days):
+#   BPCL       77.8% win  +₹330  maxDD ₹16   ← small sample (9 trades)
+#   ONGC       52.6% win  +₹304  maxDD ₹31
+#   IDFCFIRSTB 47.6% win  +₹280  maxDD ₹92   ← new discovery
+#   HCLTECH    52.2% win  +₹278  maxDD ₹172
+#   DABUR      52.9% win  +₹273  maxDD ₹97   ← new discovery
+#   GODREJCP   60.0% win  +₹248  maxDD ₹88   ← new discovery
+#   BAJFINANCE 41.7% win  +₹218  maxDD ₹205
+#   JSWSTEEL   48.0% win  +₹193  maxDD ₹134
+#   DRREDDY    50.0% win  +₹187  maxDD ₹32   ← new discovery
+#   SUNPHARMA  56.5% win  +₹169  maxDD ₹102
 INDIA_SYMBOLS = [
-    "ONGC", "HCLTECH", "BAJFINANCE", "JSWSTEEL", "ADANIENT",
-    "SUNPHARMA", "POWERGRID", "RELIANCE",
+    "ONGC", "IDFCFIRSTB", "HCLTECH", "DABUR", "GODREJCP",
+    "BAJFINANCE", "JSWSTEEL", "DRREDDY", "SUNPHARMA", "BPCL",
 ]
 
 # Pre-resolved SmartAPI NSE tokens for INDIA_SYMBOLS.
@@ -198,14 +199,23 @@ INDIA_TOKEN_MAP: dict[str, str] = {
 }
 
 # Symbols proven to lose money on ORB — never trade these.
-# Backtest losses: MARUTI -₹408 | DMART -₹340 | TITAN -₹234 | INFY -₹170
-#                  NTPC -₹167  | SBIN -₹123  | ICICIBANK -₹114 | KOTAKBANK -₹106
-#                  WIPRO -₹66  | HDFCLIFE -₹66 | IRCTC -₹71   | TCS -₹98 (18% win!)
-#                  BHARTIARTL -₹35 (48.4% win but negative total across 31 trades)
+# Original 9-symbol backtest losers:
+#   MARUTI -₹408 | DMART -₹340 | TITAN -₹234 | INFY -₹170 | NTPC -₹167
+#   TCS -₹98 (18% win!) | SBIN -₹123 | ICICIBANK -₹114 | KOTAKBANK -₹106
+#   WIPRO -₹66 | HDFCLIFE -₹66 | IRCTC -₹71 | BHARTIARTL -₹35
+# Full 45-symbol universe backtest additions:
+#   ABB -₹740 | EICHERMOT -₹519 | HEROMOTOCO -₹455 | TVSMOTOR -₹256
+#   MUTHOOTFIN -₹242 | HAL -₹218 | APOLLOHOSP -₹163 | INDUSINDBK -₹163
+#   CHOLAFIN -₹165 | TECHM -₹162 | BAJAJFINSV -₹106 | HAVELLS -₹103
+#   AXISBANK -₹76 | TRENT -₹88 | BANKBARODA -₹56 | GRASIM -₹49
 INDIA_BLOCKLIST = [
+    # Original confirmed losers
     "MARUTI", "DMART", "TITAN", "INFY", "NTPC", "TCS",
     "SBIN", "ICICIBANK", "KOTAKBANK", "WIPRO", "HDFCLIFE",
-    "ITC", "IRCTC", "HINDUNILVR", "LT", "HDFCBANK",
-    "BHARTIARTL",
+    "ITC", "IRCTC", "HINDUNILVR", "LT", "HDFCBANK", "BHARTIARTL",
+    # Universe backtest new additions
+    "ABB", "EICHERMOT", "HEROMOTOCO", "TVSMOTOR", "MUTHOOTFIN",
+    "HAL", "APOLLOHOSP", "INDUSINDBK", "CHOLAFIN", "TECHM",
+    "BAJAJFINSV", "HAVELLS", "AXISBANK", "TRENT", "BANKBARODA", "GRASIM",
 ]
 

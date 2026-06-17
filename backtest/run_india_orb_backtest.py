@@ -319,7 +319,7 @@ def _print_or_range_breakdown(trades: list[dict]) -> None:
 # Full ranking
 # ---------------------------------------------------------------------------
 
-def run_ranking(symbols: list[str], nifty_bars) -> None:
+def run_ranking(symbols: list[str], nifty_bars, label: str | None = None) -> None:
     RESULTS_DIR.mkdir(exist_ok=True)
     print(f"\nIndia ORB Backtest Ranking — {len(symbols)} symbols")
     print(f"₹{INDIA_POSITION_SIZE_INR:,}/trade | mult={INDIA_ORB_PROFIT_MULTIPLIER}×"
@@ -356,7 +356,8 @@ def run_ranking(symbols: list[str], nifty_bars) -> None:
           .reset_index(drop=True))
     df.index += 1
 
-    csv_path = RESULTS_DIR / "india_orb_ranking.csv"
+    suffix   = f"_{label}" if label else ""
+    csv_path = RESULTS_DIR / f"india_orb{suffix}_ranking.csv"
     df.to_csv(csv_path)
 
     w = 95
@@ -494,16 +495,32 @@ def run_optimize(symbols: list[str], nifty_bars) -> None:
 if __name__ == "__main__":
     args = sys.argv[1:]
 
+    # --universe: use the full NSE_UNIVERSE screener pool instead of INDIA_SYMBOLS
+    use_universe = "--universe" in args
+    if use_universe:
+        from india_screener import NSE_UNIVERSE
+        default_syms = NSE_UNIVERSE
+        print(f"Universe mode — {len(NSE_UNIVERSE)} symbols from NSE_UNIVERSE")
+    else:
+        default_syms = INDIA_SYMBOLS
+
     if "--fetch" in args:
-        print("Fetching NSE data...")
-        syms_to_fetch = [a for a in args if not a.startswith("--")] or INDIA_SYMBOLS
+        print("Fetching NSE data (yfinance, last 60 days)...")
+        syms_to_fetch = [a for a in args if not a.startswith("--")] or default_syms
+        ok, fail = [], []
         for sym in syms_to_fetch:
             try:
                 path = fetch_nse_bars(sym, DATA_DIR)
                 df   = load_nse_bars_df(path)
-                print(f"  OK  {sym}: {len(df)} bars")
+                days = df.index.normalize().nunique()
+                print(f"  OK  {sym:<14} {len(df):>5} bars  {days} trading days")
+                ok.append(sym)
             except Exception as e:
                 print(f"  ERR {sym}: {e}")
+                fail.append(sym)
+        print(f"\n  {len(ok)} OK  |  {len(fail)} failed")
+        if fail:
+            print(f"  Failed: {', '.join(fail)}")
         args = [a for a in args if a != "--fetch"]
         print()
 
@@ -512,12 +529,13 @@ if __name__ == "__main__":
     print("OK" if nifty else "FAILED (trend filter disabled)")
 
     if "--optimize" in args:
-        syms = [a for a in args if not a.startswith("--")] or INDIA_SYMBOLS
+        syms = [a for a in args if not a.startswith("--")] or default_syms
         run_optimize(syms, nifty)
 
     elif "--rank" in args:
-        syms = [a for a in args if not a.startswith("--")] or INDIA_SYMBOLS
-        run_ranking(syms, nifty)
+        syms = [a for a in args if not a.startswith("--")] or default_syms
+        label = "universe" if use_universe else None
+        run_ranking(syms, nifty, label=label)
 
     else:
         syms = [a for a in args if not a.startswith("--")] or ["RELIANCE"]

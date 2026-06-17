@@ -30,7 +30,7 @@ NSE_UNIVERSE = [
     "AXISBANK", "INDUSINDBK", "BAJAJFINSV", "BANKBARODA",
     "IDFCFIRSTB", "FEDERALBNK", "CHOLAFIN", "MUTHOOTFIN",
     # Auto
-    "TATAMOTORS", "HEROMOTOCO", "EICHERMOT", "TVSMOTOR",
+    "HEROMOTOCO", "EICHERMOT", "TVSMOTOR",
     # Metals & Materials
     "TATASTEEL", "HINDALCO", "VEDL", "GRASIM", "ULTRACEMCO",
     # Pharma & Healthcare
@@ -43,8 +43,6 @@ NSE_UNIVERSE = [
     "BRITANNIA", "DABUR", "MARICO", "TATACONSUM", "GODREJCP",
     # Capital Goods / Defence
     "HAL", "BEL", "HAVELLS", "SIEMENS", "ABB",
-    # New Economy
-    "ZOMATO",
     # Others
     "TRENT", "PIDILITIND",
 ]
