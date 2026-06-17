@@ -163,23 +163,23 @@ INDIA_MAX_ENTRY_MINUTE    = 30     # no new entries after 12:30 IST
 # Daily loss circuit-breaker
 INDIA_DAILY_LOSS_LIMIT_PCT = 0.05  # stop new entries if day P&L < -5%
 
-# Number of NSE symbols to scan each cycle
-INDIA_SCREENER_LIMIT = 10
+# Number of top symbols to pick from NSE_UNIVERSE each day (by prev-day turnover)
+INDIA_SCREENER_LIMIT = 15
 
-# Backtest-validated symbol list — only symbols with positive P&L in backtesting.
-# Ranked by total P&L (58 trading days, ₹5,000/trade, long-only baseline):
-#   SUNPHARMA  67% win  +₹121  maxDD ₹34    ← tightest drawdown
-#   ADANIENT   50% win  +₹147  maxDD ₹105   ← best return
-#   JSWSTEEL   47% win  +₹101  maxDD ₹144
-#   POWERGRID  56% win  +₹75   maxDD ₹82
-#   HCLTECH    40% win  +₹73   maxDD ₹154
-#   BAJFINANCE 50% win  +₹72   maxDD ₹133
-#   ONGC       38% win  +₹67   maxDD ₹129
-#   RELIANCE   41% win  +₹56   maxDD ₹57    ← lowest drawdown in class
-#   BHARTIARTL 47% win  +₹15   maxDD ₹86
+# Backtested shortlist — used as FALLBACK when the live screener fails.
+# Ranked by total P&L (bidirectional, 0.5% stop, 1.5× target, 2% OR cap):
+#   ONGC       58.8% win  +₹327  maxDD ₹31    ← best win rate
+#   HCLTECH    47.8% win  +₹271  maxDD ₹172
+#   BAJFINANCE 43.5% win  +₹218  maxDD ₹205
+#   JSWSTEEL   45.8% win  +₹193  maxDD ₹134
+#   ADANIENT   50.0% win  +₹183  maxDD ₹79
+#   SUNPHARMA  59.1% win  +₹169  maxDD ₹101
+#   POWERGRID  45.0% win  +₹143  maxDD ₹100
+#   RELIANCE   41.2% win  +₹90   maxDD ₹114
+#   BHARTIARTL removed — only losing symbol (-₹35 across 31 trades)
 INDIA_SYMBOLS = [
-    "SUNPHARMA", "ADANIENT", "JSWSTEEL", "POWERGRID", "HCLTECH",
-    "BAJFINANCE", "ONGC", "RELIANCE", "BHARTIARTL",
+    "ONGC", "HCLTECH", "BAJFINANCE", "JSWSTEEL", "ADANIENT",
+    "SUNPHARMA", "POWERGRID", "RELIANCE",
 ]
 
 # Pre-resolved SmartAPI NSE tokens for INDIA_SYMBOLS.
@@ -201,9 +201,11 @@ INDIA_TOKEN_MAP: dict[str, str] = {
 # Backtest losses: MARUTI -₹408 | DMART -₹340 | TITAN -₹234 | INFY -₹170
 #                  NTPC -₹167  | SBIN -₹123  | ICICIBANK -₹114 | KOTAKBANK -₹106
 #                  WIPRO -₹66  | HDFCLIFE -₹66 | IRCTC -₹71   | TCS -₹98 (18% win!)
+#                  BHARTIARTL -₹35 (48.4% win but negative total across 31 trades)
 INDIA_BLOCKLIST = [
     "MARUTI", "DMART", "TITAN", "INFY", "NTPC", "TCS",
     "SBIN", "ICICIBANK", "KOTAKBANK", "WIPRO", "HDFCLIFE",
     "ITC", "IRCTC", "HINDUNILVR", "LT", "HDFCBANK",
+    "BHARTIARTL",
 ]
 

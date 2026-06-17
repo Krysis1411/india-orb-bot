@@ -1,67 +1,161 @@
 """
-NSE top movers screener for India ORB bot.
+Pre-market NSE screener for the India ORB bot.
 
-Primary: NSE live most-active endpoint (by volume, session-based request).
-Fallback: static INDIA_SYMBOLS list from config.py.
+Ranks a pool of ~50 liquid NSE stocks by previous-day rupee turnover
+(close price × volume) using yfinance — no AngelOne auth required.
+
+Called ONCE at bot startup (~08:50 IST), before the ORB window opens.
+The result is fixed for the whole session; the bot does not re-rank
+mid-day. Fallback: INDIA_SYMBOLS from config.py (the backtested shortlist).
 """
-import logging
-import requests
+from __future__ import annotations
 
-from config import INDIA_SCREENER_LIMIT, INDIA_SYMBOLS
+import logging
+
+import pandas as pd
+import yfinance as yf
+
+from config import INDIA_BLOCKLIST, INDIA_SCREENER_LIMIT, INDIA_SYMBOLS
 
 log = logging.getLogger(__name__)
 
-# NSE blocks direct XHR — a session cookie from the homepage is required first.
-_NSE_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.nseindia.com/",
-}
+# Curated pool of ~50 liquid NSE stocks suitable for ORB.
+# Excludes INDIA_BLOCKLIST losers. Covers Nifty 100/200 across key sectors.
+# The screener picks the top INDIA_SCREENER_LIMIT by yesterday's turnover daily.
+NSE_UNIVERSE = [
+    # Confirmed ORB performers (backtested shortlist)
+    "SUNPHARMA", "ADANIENT", "JSWSTEEL", "POWERGRID", "HCLTECH",
+    "BAJFINANCE", "ONGC", "RELIANCE", "BHARTIARTL",
+    # Banks & Financials
+    "AXISBANK", "INDUSINDBK", "BAJAJFINSV", "BANKBARODA",
+    "IDFCFIRSTB", "FEDERALBNK", "CHOLAFIN", "MUTHOOTFIN",
+    # Auto
+    "TATAMOTORS", "HEROMOTOCO", "EICHERMOT", "TVSMOTOR",
+    # Metals & Materials
+    "TATASTEEL", "HINDALCO", "VEDL", "GRASIM", "ULTRACEMCO",
+    # Pharma & Healthcare
+    "DRREDDY", "CIPLA", "DIVISLAB", "APOLLOHOSP", "TORNTPHARM",
+    # IT (non-blocklisted)
+    "TECHM",
+    # Energy
+    "BPCL", "COALINDIA",
+    # Consumer / FMCG
+    "BRITANNIA", "DABUR", "MARICO", "TATACONSUM", "GODREJCP",
+    # Capital Goods / Defence
+    "HAL", "BEL", "HAVELLS", "SIEMENS", "ABB",
+    # New Economy
+    "ZOMATO",
+    # Others
+    "TRENT", "PIDILITIND",
+]
 
 
-def _fetch_nse_most_active() -> list[str]:
+def _fetch_prev_day_data(symbols: list[str]) -> dict[str, dict]:
     """
-    Fetch the most actively traded NSE stocks by value from the NSE live API.
-    Requires a browser-like session cookie obtained from the NSE homepage.
+    Batch-fetch previous trading day's Close and Volume for NSE symbols
+    via yfinance (SYMBOL.NS suffix).  Returns {symbol: {close, volume, turnover}}.
+    Empty dict on failure.
     """
-    session = requests.Session()
-    # Seed the session with a cookie from the main site
-    session.get("https://www.nseindia.com", headers=_NSE_HEADERS, timeout=15)
-    resp = session.get(
-        "https://www.nseindia.com/api/live-analysis-stocksTraded",
-        params={"index": "val", "limit": INDIA_SCREENER_LIMIT},
-        headers=_NSE_HEADERS,
-        timeout=10,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    symbols = [d["symbol"] for d in (data.get("data") or [])[:INDIA_SCREENER_LIMIT]]
-    return symbols
+    yf_syms = [f"{s}.NS" for s in symbols]
 
-
-def get_active_nse_symbols() -> list[str]:
-    """
-    Return up to INDIA_SCREENER_LIMIT NSE stock symbols ranked by trading activity.
-    Falls back to the static INDIA_SYMBOLS list from config.py if live fetch fails.
-    """
     try:
-        symbols = _fetch_nse_most_active()
-        if symbols:
-            log.info(f"NSE screener: {len(symbols)} symbols — {', '.join(symbols)}")
-            return symbols
-        log.warning("NSE screener returned empty list — using fallback")
+        raw = yf.download(
+            " ".join(yf_syms),
+            period="5d",
+            interval="1d",
+            progress=False,
+            auto_adjust=True,
+        )
     except Exception as e:
-        log.warning(f"NSE screener failed ({e}) — using INDIA_SYMBOLS fallback")
+        log.warning(f"Screener: yfinance download failed — {e}")
+        return {}
 
-    fallback = list(INDIA_SYMBOLS[:INDIA_SCREENER_LIMIT])
-    log.info(f"Fallback symbols ({len(fallback)}): {', '.join(fallback)}")
-    return fallback
+    if raw is None or (hasattr(raw, "empty") and raw.empty):
+        return {}
+
+    result: dict[str, dict] = {}
+
+    for sym, yf_sym in zip(symbols, yf_syms):
+        try:
+            if isinstance(raw.columns, pd.MultiIndex):
+                # Multi-ticker download: try (metric, ticker) layout first,
+                # then fall back to (ticker, metric) layout.
+                try:
+                    close_s  = raw["Close"][yf_sym].dropna()
+                    volume_s = raw["Volume"][yf_sym].dropna()
+                except KeyError:
+                    close_s  = raw[yf_sym]["Close"].dropna()
+                    volume_s = raw[yf_sym]["Volume"].dropna()
+            else:
+                # Single-ticker layout (shouldn't happen in batch, but safe fallback)
+                close_s  = raw["Close"].dropna()
+                volume_s = raw["Volume"].dropna()
+
+            if close_s.empty or volume_s.empty:
+                continue
+
+            close  = float(close_s.iloc[-1])
+            volume = float(volume_s.iloc[-1])
+
+            if close > 0 and volume > 0:
+                result[sym] = {
+                    "close":    close,
+                    "volume":   volume,
+                    "turnover": close * volume,
+                }
+        except Exception:
+            pass
+
+    return result
+
+
+def get_active_nse_symbols(
+    n: int | None = None,
+    universe: list[str] | None = None,
+) -> list[str]:
+    """
+    Return the top `n` NSE symbols ranked by previous-day rupee turnover
+    from NSE_UNIVERSE (minus INDIA_BLOCKLIST).
+
+    Falls back to INDIA_SYMBOLS if yfinance fails.
+    Call this ONCE at bot startup — not inside the 5-min trading loop.
+    """
+    n = n or INDIA_SCREENER_LIMIT
+    blocklist = set(INDIA_BLOCKLIST)
+    candidates = [s for s in (universe or NSE_UNIVERSE) if s not in blocklist]
+
+    log.info(f"Screener: ranking {len(candidates)} symbols by prev-day turnover (yfinance)...")
+
+    data = _fetch_prev_day_data(candidates)
+
+    if not data:
+        log.warning("Screener: yfinance returned no data — falling back to INDIA_SYMBOLS")
+        fallback = [s for s in INDIA_SYMBOLS if s not in blocklist][:n]
+        log.info(f"Fallback ({len(fallback)}): {', '.join(fallback)}")
+        return fallback
+
+    ranked = sorted(data.items(), key=lambda x: x[1]["turnover"], reverse=True)
+    top    = ranked[:n]
+
+    log.info(f"Today's top {n} by prev-day rupee turnover:")
+    for sym, d in top:
+        log.info(
+            f"  {sym:<14} ₹{d['close']:.0f}  "
+            f"vol {d['volume'] / 1e6:.1f}M  "
+            f"turnover ₹{d['turnover'] / 1e7:.1f}Cr"
+        )
+
+    selected = [sym for sym, _ in top]
+
+    # Surface any backtested favourites that didn't make today's cut
+    known_good = [s for s in INDIA_SYMBOLS if s not in selected and s not in blocklist]
+    if known_good:
+        log.info(f"  (backtested symbols outside today's top {n}: {', '.join(known_good)})")
+
+    return selected
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    print("NSE active symbols:", get_active_nse_symbols())
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
+    syms = get_active_nse_symbols()
+    print(f"\nSelected {len(syms)} symbols for today: {', '.join(syms)}")

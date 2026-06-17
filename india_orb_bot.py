@@ -58,6 +58,11 @@ DRY_RUN = False  # Overridden to True by --dry-run CLI flag
 # Exchange-level STOPLOSS_MARKET orders protect the position without polling.
 _sl_orders: dict[str, str] = {}
 
+# Populated once at startup by the pre-market screener.
+# Maps symbol → SmartAPI token for today's watchlist.
+# Fixed for the whole session — screener does not re-run mid-day.
+today_tokens: dict[str, str] = {}
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -380,22 +385,14 @@ def run_india_orb() -> None:
         log.warning("Blocking new entries — risk limit active")
         return
 
-    active_symbols = get_active_nse_symbols()
-    if not active_symbols:
-        log.warning("NSE screener returned no symbols — skipping new entries")
+    if not today_tokens:
+        log.warning("No symbols in today's watchlist — skipping new entries")
         return
 
-    for symbol in active_symbols:
+    for symbol, token in today_tokens.items():
         _time.sleep(1.5)  # throttle between symbols — avoid AngelOne burst rate limit
         if symbol in held_symbols:
             continue  # already managed above
-        if symbol in INDIA_BLOCKLIST:
-            log.debug(f"{symbol}: on blocklist — skipping")
-            continue
-        token = client.resolve_token(symbol)
-        if token is None:
-            log.warning(f"{symbol}: skipping — could not resolve SmartAPI token")
-            continue
         try:
             opened = process_symbol(symbol, token, nifty_up, open_count, max_positions)
             if opened:
@@ -441,6 +438,23 @@ if __name__ == "__main__":
     if not client.connect():
         log.error("AngelOne authentication failed — check credentials in .env")
         raise SystemExit(1)
+
+    # Run pre-market screener once — picks today's symbols by prev-day turnover
+    log.info("Running pre-market screener (yfinance, ~10s)...")
+    _screener_syms = get_active_nse_symbols()
+
+    # Resolve SmartAPI tokens for all selected symbols upfront.
+    # INDIA_TOKEN_MAP handles known symbols instantly; new symbols call searchScrip.
+    # Done here (~08:50 IST) so tokens are ready before the 09:45 ORB window.
+    log.info(f"Resolving tokens for {len(_screener_syms)} symbols...")
+    for _sym in _screener_syms:
+        _tok = client.resolve_token(_sym)
+        if _tok:
+            today_tokens[_sym] = _tok
+        else:
+            log.warning(f"  {_sym}: token unresolvable — excluded from today's watchlist")
+        _time.sleep(0.5)
+    log.info(f"Today's watchlist ({len(today_tokens)}): {', '.join(today_tokens)}")
 
     log.info(
         f"India ORB Bot | OR: first {INDIA_ORB_RANGE_BARS}×5-min bars (09:15–09:45 IST)"
