@@ -244,8 +244,7 @@ def process_symbol(
         return False
 
     if nifty_up is None:
-        log.info(f"{symbol}: Nifty data not ready — skipping entry")
-        return False
+        log.warning(f"Nifty data unavailable — entries proceed without trend filter")
 
     vol_ok = current_volume >= avg_or_volume * INDIA_ORB_VOLUME_FACTOR
 
