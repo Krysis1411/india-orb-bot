@@ -149,7 +149,7 @@ INDIA_ORB_MAX_OR_PCT        = 0.020  # 2.0% max OR range — skip gap/spike days
                                       # Wide ranges = noisy, stops blow out too easily
 INDIA_ORB_PROFIT_MULTIPLIER = 1.5    # target = OR range × 1.5 beyond breakout level
 INDIA_ORB_VOLUME_FACTOR     = 1.0    # breakout volume must be ≥ 1× avg OR bar volume
-INDIA_ORB_STOP_BUFFER_PCT   = 0.005  # stop = 0.5% beyond OR boundary (optimizer best result)
+INDIA_ORB_STOP_BUFFER_PCT   = 0.010  # stop = 1.0% beyond OR boundary (optimizer: 197-trade validation)
 
 # Directional bias — trade both breakout above AND breakout below (short selling intraday)
 INDIA_ALLOW_SHORTS = True
