@@ -263,6 +263,10 @@ def process_symbol(
                 f" | Stop: ₹{long_stop:.2f} | Target: ₹{long_target:.2f}"
                 f" | Vol: {current_volume/avg_or_volume:.1f}×"
             )
+            log.info(
+                f"[DRY RUN] SL ORDER — SELL {trade_qty} {symbol}"
+                f" trigger ₹{long_stop:.2f} (exchange-level STOPLOSS_MARKET)"
+            )
             return True
         order_id = client.place_market_order(symbol, token, "BUY", trade_qty)
         if order_id:
@@ -284,6 +288,10 @@ def process_symbol(
                 f"[DRY RUN] SELL SHORT {trade_qty} {symbol} | ₹{current_price:.2f}"
                 f" | Stop: ₹{short_stop:.2f} | Target: ₹{short_target:.2f}"
                 f" | Vol: {current_volume/avg_or_volume:.1f}×"
+            )
+            log.info(
+                f"[DRY RUN] SL ORDER — BUY {trade_qty} {symbol}"
+                f" trigger ₹{short_stop:.2f} (exchange-level STOPLOSS_MARKET)"
             )
             return True
         order_id = client.place_market_order(symbol, token, "SELL", trade_qty)
