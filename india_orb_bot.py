@@ -379,6 +379,7 @@ def run_india_orb() -> None:
         return
 
     for symbol in active_symbols:
+        _time.sleep(0.4)  # throttle between symbols — avoid AngelOne burst rate limit
         if symbol in held_symbols:
             continue  # already managed above
         if symbol in INDIA_BLOCKLIST:

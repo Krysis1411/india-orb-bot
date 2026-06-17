@@ -16,6 +16,7 @@ The JWT session token is valid until midnight — no need to re-auth mid-day.
 """
 import logging
 import os
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -98,12 +99,16 @@ class AngelOneClient:
                 resp = self._obj.searchScrip(exchange, query)
                 hits = resp.get("data") or []
                 if hits:
-                    token = str(hits[0]["symboltoken"])
+                    # Prefer exact SYMBOL-EQ equity match; fall back to first result
+                    eq_name = f"{symbol}-EQ"
+                    hit = next((h for h in hits if h.get("tradingsymbol") == eq_name), hits[0])
+                    token = str(hit["symboltoken"])
                     self._token_cache[cache_key] = token
-                    log.debug(f"Token resolved: {symbol} → {token} ({hits[0]['tradingsymbol']})")
+                    log.debug(f"Token resolved: {symbol} → {token} ({hit['tradingsymbol']})")
                     return token
             except Exception:
                 pass
+            time.sleep(0.3)  # avoid searchScrip burst rate limit
 
         log.warning(f"Could not resolve SmartAPI token for {symbol}")
         return None
