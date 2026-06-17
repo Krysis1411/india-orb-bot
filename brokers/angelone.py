@@ -86,9 +86,13 @@ class AngelOneClient:
     def resolve_token(self, symbol: str, exchange: str = "NSE") -> str | None:
         """
         Return the SmartAPI symboltoken for an NSE equity symbol.
-        Results are cached so each symbol is resolved only once per session.
-        Tries '<symbol>-EQ' first (NSE equity series), then bare symbol.
+        Checks INDIA_TOKEN_MAP first (zero API calls for known symbols),
+        then falls back to searchScrip with EQ-preference and caching.
         """
+        from config import INDIA_TOKEN_MAP
+        if symbol in INDIA_TOKEN_MAP:
+            return INDIA_TOKEN_MAP[symbol]
+
         cache_key = f"{exchange}:{symbol}"
         if cache_key in self._token_cache:
             return self._token_cache[cache_key]
@@ -108,7 +112,7 @@ class AngelOneClient:
                     return token
             except Exception:
                 pass
-            time.sleep(0.3)  # avoid searchScrip burst rate limit
+            time.sleep(0.3)
 
         log.warning(f"Could not resolve SmartAPI token for {symbol}")
         return None

@@ -182,6 +182,21 @@ INDIA_SYMBOLS = [
     "BAJFINANCE", "ONGC", "RELIANCE", "BHARTIARTL",
 ]
 
+# Pre-resolved SmartAPI NSE tokens for INDIA_SYMBOLS.
+# Avoids repeated searchScrip calls during trading (cuts API calls ~50%).
+# Verified live via searchScrip on 2026-06-17. Update if a symbol is renamed.
+INDIA_TOKEN_MAP: dict[str, str] = {
+    "SUNPHARMA":  "3351",
+    "ADANIENT":   "25",
+    "JSWSTEEL":   "11723",
+    "POWERGRID":  "14977",
+    "HCLTECH":    "7229",
+    "BAJFINANCE": "317",
+    "ONGC":       "2475",
+    "RELIANCE":   "2885",
+    "BHARTIARTL": "10604",
+}
+
 # Symbols proven to lose money on ORB — never trade these.
 # Backtest losses: MARUTI -₹408 | DMART -₹340 | TITAN -₹234 | INFY -₹170
 #                  NTPC -₹167  | SBIN -₹123  | ICICIBANK -₹114 | KOTAKBANK -₹106
