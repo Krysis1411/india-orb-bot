@@ -66,6 +66,11 @@ _sl_orders: dict[str, str] = {}
 # Reset each session (dict is empty at startup).
 _trailing_activated: dict[str, bool] = {}
 
+# Opening-range cache: computed once after 09:45 and reused all day.
+# Keys: symbol. Values: {or_high, or_low, avg_or_volume}.
+# Avoids repeated getCandleData calls for OR data that never changes after 09:45.
+_or_cache: dict[str, dict] = {}
+
 # Session-start equity — set once at startup for daily P&L tracking.
 _session_start_equity: float = 0.0
 
@@ -154,22 +159,38 @@ def process_symbol(
     max_open_positions: int,
     positions: list[dict] | None = None,
     orders: list[dict] | None = None,
+    ltp: float | None = None,
+    or_data: dict | None = None,
 ) -> bool:
     """
     Evaluate one NSE stock for ORB entry / position management.
-    Returns True if a new BUY was placed.
+    Returns True if a new entry order was placed.
+
+    ltp     — pre-fetched LTP from batch quote (skips getCandleData for price)
+    or_data — pre-computed OR {or_high, or_low, avg_or_volume} from _or_cache
+              (skips getCandleData for OR; getCandleData still called for volume
+              confirmation if a breakout is detected and volume filter is active)
     """
-    bars = client.get_today_candles(symbol, token)
-    if bars is None:
-        log.info(f"{symbol}: no bars yet")
-        return False
+    # ── OR levels ──────────────────────────────────────────────────────────
+    if or_data is not None:
+        or_high       = or_data["or_high"]
+        or_low        = or_data["or_low"]
+        avg_or_volume = or_data["avg_or_volume"]
+    else:
+        # OR not cached yet — fetch bars and compute it now
+        bars = client.get_today_candles(symbol, token)
+        if bars is None:
+            log.info(f"{symbol}: no bars yet")
+            return False
+        or_result = compute_opening_range(bars)
+        if or_result is None:
+            log.info(f"{symbol}: opening range not ready ({len(bars)}/{INDIA_ORB_RANGE_BARS} bars)")
+            return False
+        or_high, or_low, avg_or_volume = or_result
+        # Use last bar price if no LTP provided
+        if ltp is None:
+            ltp = float(bars.iloc[-1]["close"])
 
-    or_result = compute_opening_range(bars)
-    if or_result is None:
-        log.info(f"{symbol}: opening range not ready ({len(bars)}/{INDIA_ORB_RANGE_BARS} bars)")
-        return False
-
-    or_high, or_low, avg_or_volume = or_result
     or_range = or_high - or_low
 
     # Skip indecisive / narrow opening ranges
@@ -185,9 +206,20 @@ def process_symbol(
         log.info(f"{symbol}: OR too wide ({or_pct:.2%} > {INDIA_ORB_MAX_OR_PCT:.1%}) — gap/spike day, skipping")
         return False
 
-    current_bar    = bars.iloc[-1]
-    current_price  = float(current_bar["close"])
-    current_volume = float(current_bar["volume"])
+    # ── Current price ──────────────────────────────────────────────────────
+    # Use real-time LTP from batch quote when available — more accurate than
+    # the 5-min bar close and requires no extra API call.
+    # For volume check on entry we fetch the current bar separately below.
+    if ltp is not None:
+        current_price = ltp
+        current_volume: float | None = None   # fetched on-demand at entry
+    else:
+        # Fallback: fetch bars if LTP wasn't passed in
+        bars = client.get_today_candles(symbol, token)
+        if bars is None:
+            return False
+        current_price  = float(bars.iloc[-1]["close"])
+        current_volume = float(bars.iloc[-1]["volume"])
     now            = now_ist()
     trade_qty      = max(1, int(INDIA_POSITION_SIZE_INR / current_price))
 
@@ -307,6 +339,11 @@ def process_symbol(
 
     if nifty_up is None:
         log.warning(f"Nifty data unavailable — entries proceed without trend filter")
+
+    # Volume confirmation — fetch current bar if not already available
+    if current_volume is None:
+        _bars = client.get_today_candles(symbol, token)
+        current_volume = float(_bars.iloc[-1]["volume"]) if _bars is not None else 0.0
 
     vol_ok = current_volume >= avg_or_volume * INDIA_ORB_VOLUME_FACTOR
 
@@ -451,16 +488,53 @@ def run_india_orb() -> None:
         if raw_sym and token:
             held_symbols[raw_sym] = token
 
+    open_count    = len(open_positions)
+    max_positions = max(1, int(INDIA_MAX_TOTAL_INR / INDIA_POSITION_SIZE_INR))
+
+    # --- Batch quote: fetch LTP + OHLC for ALL symbols in one API call --------
+    # market/v1/quote supports 50 tokens per request at 1 req/s.
+    # Falls back to per-symbol getCandleData if the batch call fails.
+    batch_prices: dict[str, dict] = {}
+    if today_tokens:
+        batch_prices = client.get_batch_quote(today_tokens)
+        if not batch_prices:
+            log.warning("Batch quote failed — will fall back to getCandleData per symbol")
+
+    # --- OR cache: compute opening range for uncached symbols (once after 09:45) ---
+    past_orb_window = now.time() >= ORB_READY_IST
+    if past_orb_window and today_tokens:
+        uncached = [s for s in today_tokens if s not in _or_cache]
+        if uncached:
+            log.info(f"Computing OR for {len(uncached)} uncached symbols...")
+            for sym in uncached:
+                _time.sleep(1.1)   # getCandleData: 3/s; 1.1s keeps us safe across symbols
+                tok = today_tokens[sym]
+                bars = client.get_today_candles(sym, tok)
+                if bars is None:
+                    continue
+                or_result = compute_opening_range(bars)
+                if or_result is None:
+                    continue
+                or_high, or_low, avg_or_vol = or_result
+                or_range = or_high - or_low
+                or_pct   = or_range / or_high if or_high > 0 else 0
+                if or_pct < INDIA_ORB_MIN_OR_PCT or (INDIA_ORB_MAX_OR_PCT > 0 and or_pct > INDIA_ORB_MAX_OR_PCT):
+                    # Mark as skip so we don't retry each cycle
+                    _or_cache[sym] = {"or_high": 0, "or_low": 0, "avg_or_volume": 0, "skip": True}
+                else:
+                    _or_cache[sym] = {"or_high": or_high, "or_low": or_low, "avg_or_volume": avg_or_vol}
+                    log.info(f"  {sym}: OR ₹{or_low:.2f}–₹{or_high:.2f} ({or_pct:.2%})")
+
+    # --- Manage held positions (use batch LTP — no getCandleData needed) ----------
     for sym, tok in held_symbols.items():
-        _time.sleep(1.1)  # getCandleData limit: 3/s — held loop has no other throttle
+        ltp = batch_prices.get(sym, {}).get("ltp")
         try:
             process_symbol(sym, tok, nifty_up, len(open_positions), 0,
-                           positions=open_positions, orders=cached_orders)
+                           positions=open_positions, orders=cached_orders,
+                           ltp=ltp, or_data=_or_cache.get(sym))
         except Exception as e:
             log.error(f"{sym}: unexpected error managing position — {e}")
-
-    open_count     = len(open_positions)
-    max_positions  = max(1, int(INDIA_MAX_TOTAL_INR / INDIA_POSITION_SIZE_INR))
+        _time.sleep(0.5)   # small gap between held-symbol calls
 
     # --- Screen for new entry opportunities ---
     if _block_new_entries:
@@ -472,16 +546,33 @@ def run_india_orb() -> None:
         return
 
     for symbol, token in today_tokens.items():
-        _time.sleep(1.5)  # getCandleData limit: 3/s, 180/min — 1.5s keeps us well under
         if symbol in held_symbols:
             continue  # already managed above
+
+        or_data = _or_cache.get(symbol)
+        if or_data and or_data.get("skip"):
+            continue  # OR was too narrow/wide — not tradeable today
+
+        ltp = batch_prices.get(symbol, {}).get("ltp")
+
+        # Quick pre-filter using batch LTP — only call process_symbol for symbols
+        # near a breakout or with no OR cached yet (avoids getCandleData for quiet symbols)
+        if or_data and ltp is not None:
+            near_long  = ltp > or_data["or_high"]
+            near_short = ltp < or_data["or_low"] and INDIA_ALLOW_SHORTS
+            if not near_long and not near_short:
+                log.debug(f"{symbol}: LTP ₹{ltp:.2f} inside OR ₹{or_data['or_low']:.2f}–{or_data['or_high']:.2f} — no signal")
+                continue  # price inside OR range — skip, no getCandleData needed
+
         try:
             opened = process_symbol(symbol, token, nifty_up, open_count, max_positions,
-                                    positions=open_positions, orders=cached_orders)
+                                    positions=open_positions, orders=cached_orders,
+                                    ltp=ltp, or_data=or_data)
             if opened:
                 open_count += 1
         except Exception as e:
             log.error(f"{symbol}: unexpected error — {e}")
+        _time.sleep(1.1)   # getCandleData only called here for breakout candidates
 
 
 # ---------------------------------------------------------------------------

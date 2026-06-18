@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pyotp
+import requests
 from SmartApi import SmartConnect
 
 log = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ class AngelOneClient:
         self._password    = os.environ["ANGELONE_PASSWORD"]
         self._totp_secret = os.environ["ANGELONE_TOTP_SECRET"]
         self._obj: SmartConnect | None = None
+        self._access_token: str = ""
         self._token_cache: dict[str, str] = {}
 
     # ------------------------------------------------------------------
@@ -69,6 +71,8 @@ class AngelOneClient:
                 log.error(f"AngelOne auth failed: {resp.get('message', 'unknown error')}")
                 return False
             self._obj = obj
+            # Store JWT token for direct REST calls (batch market data API)
+            self._access_token = resp.get("data", {}).get("jwtToken", "")
             log.info(f"AngelOne connected — client: {self._client_code}")
             return True
         except Exception as e:
@@ -348,6 +352,71 @@ class AngelOneClient:
         except Exception as e:
             log.error(f"get_funds failed: {e}")
             return 0.0
+
+    def get_batch_quote(
+        self,
+        token_map: dict[str, str],
+        exchange: str = "NSE",
+        mode: str = "FULL",
+    ) -> dict[str, dict]:
+        """
+        Fetch LTP + OHLC + volume for up to 50 symbols in ONE API call.
+        Returns {symbol: {ltp, open, high, low, close, volume}} or {} on failure.
+
+        Rate limit: 1 req/s per docs. 50 tokens per request.
+        Use this instead of per-symbol getCandleData for current-price scanning.
+        """
+        self._ensure_connected()
+        if not token_map:
+            return {}
+
+        token_to_sym = {tok: sym for sym, tok in token_map.items()}
+        tokens = list(token_map.values())
+
+        headers = {
+            "Authorization":    f"Bearer {self._access_token}",
+            "Content-Type":     "application/json",
+            "Accept":           "application/json",
+            "X-UserType":       "USER",
+            "X-SourceID":       "WEB",
+            "X-PrivateKey":     self._api_key,
+            "X-ClientLocalIP":  "127.0.0.1",
+            "X-ClientPublicIP": "127.0.0.1",
+            "X-MACAddress":     "00:00:00:00:00:00",
+        }
+        payload = {"mode": mode, "exchangeTokens": {exchange: tokens}}
+        try:
+            r = requests.post(
+                "https://apiconnect.angelone.in/rest/secure/angelbroking/market/v1/quote/",
+                headers=headers,
+                json=payload,
+                timeout=10,
+            )
+            result = r.json()
+            if not result.get("status"):
+                log.warning(f"get_batch_quote: {result.get('message', 'unknown error')}")
+                return {}
+
+            out: dict[str, dict] = {}
+            for item in result.get("data", {}).get("fetched", []):
+                tok = str(item.get("symbolToken", ""))
+                sym = token_to_sym.get(tok)
+                if sym:
+                    out[sym] = {
+                        "ltp":    float(item.get("ltp",         0)),
+                        "open":   float(item.get("open",        0)),
+                        "high":   float(item.get("high",        0)),
+                        "low":    float(item.get("low",         0)),
+                        "close":  float(item.get("close",       0)),
+                        "volume": int(  item.get("tradeVolume", 0)),
+                    }
+            unfetched = result.get("data", {}).get("unfetched", [])
+            if unfetched:
+                log.warning(f"get_batch_quote: {len(unfetched)} symbols unfetched")
+            return out
+        except Exception as e:
+            log.error(f"get_batch_quote failed: {e}")
+            return {}
 
     def already_traded_today(self, symbol: str, orders: list[dict] | None = None) -> bool:
         """
