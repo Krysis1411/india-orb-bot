@@ -255,8 +255,10 @@ class AngelOneClient:
         GTT is NOT used because AngelOne GTT only supports DELIVERY/MARGIN, not INTRADAY.
         """
         self._ensure_connected()
+        # variety must be "NORMAL" for standalone SL-M orders on INTRADAY positions.
+        # "STOPLOSS" variety is for bracket/cover orders only and gets rejected for MIS.
         params = {
-            "variety": "STOPLOSS",
+            "variety": "NORMAL",
             "tradingsymbol": self._eq_symbol(symbol),
             "symboltoken": token,
             "transactiontype": side.upper(),
@@ -281,7 +283,7 @@ class AngelOneClient:
             log.error(f"{symbol}: SL order placement failed ({side} × {qty} @ ₹{trigger_price:.2f}) — {e}")
             return None
 
-    def cancel_order(self, order_id: str, variety: str = "STOPLOSS") -> bool:
+    def cancel_order(self, order_id: str, variety: str = "NORMAL") -> bool:
         """
         Cancel a pending order (typically the SL order when target is hit or EOD).
         Returns True if the cancel was accepted.
