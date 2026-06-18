@@ -32,6 +32,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 from brokers.angelone import AngelOneClient
+from brokers.angelone_ws import AngelOneWebSocket
 from config import (
     INDIA_ALLOW_SHORTS,
     INDIA_BLOCKLIST,
@@ -78,6 +79,13 @@ _session_start_equity: float = 0.0
 # Maps symbol → SmartAPI token for today's watchlist.
 # Fixed for the whole session — screener does not re-run mid-day.
 today_tokens: dict[str, str] = {}
+
+# Live WebSocket feed — started after token resolution; None until then.
+# Prices are updated in real-time by a background thread.
+_ws: AngelOneWebSocket | None = None
+
+# Special key for the Nifty 50 index in the WebSocket price cache.
+_NIFTY_WS_KEY = "__NIFTY50__"
 
 # ---------------------------------------------------------------------------
 # Logging — console + rotating daily file under logs/
@@ -460,8 +468,16 @@ def run_india_orb() -> None:
         log.info(f"Building opening range — no entries before 09:45 IST")
         return
 
-    # --- Nifty trend filter (shared across all symbols) ---
-    nifty_up, nifty_pct = client.get_nifty_trend()
+    # --- Nifty trend filter (WebSocket first; REST fallback) ---
+    nifty_ws = _ws.prices.get(_NIFTY_WS_KEY) if _ws else None
+    if nifty_ws and nifty_ws.get("ltp") and nifty_ws.get("open"):
+        nifty_ltp   = nifty_ws["ltp"]
+        nifty_open  = nifty_ws["open"]
+        nifty_up    = nifty_ltp >= nifty_open
+        nifty_pct   = (nifty_ltp - nifty_open) / nifty_open if nifty_open else 0.0
+        log.info(f"Nifty50 (WS): ₹{nifty_ltp:.2f}  {'UP' if nifty_up else 'DOWN'}  ({nifty_pct:+.2%})")
+    else:
+        nifty_up, nifty_pct = client.get_nifty_trend()
 
     # --- Fetch positions and order book once per cycle (rate-limit budget) ---
     # position() limit: 1/s  |  orderBook() limit: 1/s
@@ -491,14 +507,20 @@ def run_india_orb() -> None:
     open_count    = len(open_positions)
     max_positions = max(1, int(INDIA_MAX_TOTAL_INR / INDIA_POSITION_SIZE_INR))
 
-    # --- Batch quote: fetch LTP + OHLC for ALL symbols in one API call --------
-    # market/v1/quote supports 50 tokens per request at 1 req/s.
-    # Falls back to per-symbol getCandleData if the batch call fails.
+    # --- Live prices: WebSocket cache (zero API calls) ---
+    # The background WebSocket thread updates _ws.prices on every tick.
+    # Fall back to REST batch quote only if WebSocket has not received data yet
+    # (e.g. first cycle right after startup, or WebSocket is reconnecting).
     batch_prices: dict[str, dict] = {}
-    if today_tokens:
+    if _ws and len(_ws.prices) >= max(1, len(today_tokens) // 2):
+        batch_prices = dict(_ws.prices)   # snapshot; thread may update concurrently
+        log.debug(f"Using WebSocket prices ({len(batch_prices)} symbols)")
+    elif today_tokens:
         batch_prices = client.get_batch_quote(today_tokens)
         if not batch_prices:
             log.warning("Batch quote failed — will fall back to getCandleData per symbol")
+        else:
+            log.info("WebSocket warming up — used REST batch quote this cycle")
 
     # --- OR cache: compute opening range for uncached symbols (once after 09:45) ---
     past_orb_window = now.time() >= ORB_READY_IST
@@ -639,6 +661,23 @@ if __name__ == "__main__":
         _time.sleep(1.2)  # searchScrip rate limit: 1/s — 1.2s gives safe headroom
     log.info(f"Today's watchlist ({len(today_tokens)}): {', '.join(today_tokens)}")
 
+    # --- Start WebSocket streaming -----------------------------------------------
+    # Subscribe to Quote mode (LTP + OHLCV) for all watchlist symbols plus Nifty 50.
+    # A background daemon thread keeps the connection alive and updates _ws.prices.
+    # The main loop reads _ws.prices instead of calling REST batch quote each cycle.
+    from brokers.angelone import _NIFTY50_FALLBACK_TOKEN
+    global _ws
+    _ws_token_map = dict(today_tokens)
+    _ws_token_map[_NIFTY_WS_KEY] = _NIFTY50_FALLBACK_TOKEN   # Nifty 50 index
+    _ws = AngelOneWebSocket(
+        auth_token=client._access_token,
+        feed_token=client.feed_token,
+        client_code=os.environ["ANGELONE_CLIENT_CODE"],
+        api_key=os.environ["ANGELONE_API_KEY"],
+    )
+    _ws.start(_ws_token_map)
+    log.info("WebSocket streaming started — prices will update in real-time")
+
     log.info(
         f"India ORB Bot | OR: first {INDIA_ORB_RANGE_BARS}×5-min bars (09:15–09:45 IST)"
         f" | ₹{INDIA_POSITION_SIZE_INR:,}/trade"
@@ -671,6 +710,8 @@ if __name__ == "__main__":
 
             if current_t >= MARKET_CLOSE_IST:
                 log.info(f"Past 15:30 IST — session complete, exiting")
+                if _ws:
+                    _ws.stop()
                 break
 
             run_india_orb()

@@ -55,6 +55,7 @@ class AngelOneClient:
         self._totp_secret = os.environ["ANGELONE_TOTP_SECRET"]
         self._obj: SmartConnect | None = None
         self._access_token: str = ""
+        self._feed_token: str = ""
         self._token_cache: dict[str, str] = {}
 
     # ------------------------------------------------------------------
@@ -71,13 +72,19 @@ class AngelOneClient:
                 log.error(f"AngelOne auth failed: {resp.get('message', 'unknown error')}")
                 return False
             self._obj = obj
-            # Store JWT token for direct REST calls (batch market data API)
-            self._access_token = resp.get("data", {}).get("jwtToken", "")
+            data = resp.get("data", {})
+            # Store JWT and feed tokens — JWT for REST calls, feed token for WebSocket
+            self._access_token = data.get("jwtToken", "")
+            self._feed_token   = data.get("feedToken", "")
             log.info(f"AngelOne connected — client: {self._client_code}")
             return True
         except Exception as e:
             log.error(f"AngelOne connect error: {e}")
             return False
+
+    @property
+    def feed_token(self) -> str:
+        return self._feed_token
 
     def _ensure_connected(self) -> None:
         if self._obj is None:
