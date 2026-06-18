@@ -316,13 +316,28 @@ class AngelOneClient:
             log.error(f"get_positions failed: {e}")
             return []
 
-    def get_position(self, symbol: str) -> dict | None:
-        """Return the open position for a specific symbol, or None."""
+    def get_position(self, symbol: str, positions: list[dict] | None = None) -> dict | None:
+        """
+        Return the open position for a specific symbol, or None.
+        Pass a pre-fetched positions list to avoid an extra API call (1/s rate limit).
+        """
         eq_sym = self._eq_symbol(symbol)
-        for pos in self.get_positions():
+        pool = positions if positions is not None else self.get_positions()
+        for pos in pool:
             if pos.get("tradingsymbol") == eq_sym:
                 return pos
         return None
+
+    def get_order_book(self) -> list[dict]:
+        """Fetch today's full order book. Call once per cycle and pass the result
+        to already_traded_today() to avoid repeated orderBook API calls (1/s limit)."""
+        self._ensure_connected()
+        try:
+            resp = self._obj.orderBook()
+            return resp.get("data") or []
+        except Exception as e:
+            log.error(f"get_order_book failed: {e}")
+            return []
 
     def get_available_funds_inr(self) -> float:
         """Return available cash balance in INR."""
@@ -334,24 +349,24 @@ class AngelOneClient:
             log.error(f"get_funds failed: {e}")
             return 0.0
 
-    def already_traded_today(self, symbol: str) -> bool:
-        """True if any completed opening order (BUY for long, SELL for short) exists today."""
+    def already_traded_today(self, symbol: str, orders: list[dict] | None = None) -> bool:
+        """
+        True if any completed entry order exists today for this symbol.
+        Pass pre-fetched orders list (from get_order_book()) to avoid repeated
+        orderBook API calls — the limit is 1/s and we check up to 15 symbols per cycle.
+        """
         self._ensure_connected()
         eq_sym = self._eq_symbol(symbol)
-        try:
-            resp = self._obj.orderBook()
-            orders = resp.get("data") or []
-            for o in orders:
-                if (
-                    o.get("tradingsymbol") == eq_sym
-                    and o.get("status", "").lower() in ("complete", "filled")
-                    and o.get("variety", "").upper() == "NORMAL"   # entry orders only, not SL
-                ):
-                    return True
-            return False
-        except Exception as e:
-            log.warning(f"{symbol}: order history check failed — {e}")
-            return False
+        if orders is None:
+            orders = self.get_order_book()
+        for o in orders:
+            if (
+                o.get("tradingsymbol") == eq_sym
+                and o.get("status", "").lower() in ("complete", "filled")
+                and o.get("variety", "").upper() == "NORMAL"   # entry orders only, not SL
+            ):
+                return True
+        return False
 
     def close_all_positions(self) -> None:
         """Market-close all open MIS positions at EOD — handles both longs and shorts."""

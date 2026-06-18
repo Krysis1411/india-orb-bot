@@ -152,6 +152,8 @@ def process_symbol(
     nifty_up: bool | None,
     open_positions_count: int,
     max_open_positions: int,
+    positions: list[dict] | None = None,
+    orders: list[dict] | None = None,
 ) -> bool:
     """
     Evaluate one NSE stock for ORB entry / position management.
@@ -202,7 +204,7 @@ def process_symbol(
 
     # --- EOD forced close ---
     if now.time() >= CLOSE_TIME_IST:
-        pos = client.get_position(symbol)
+        pos = client.get_position(symbol, positions)
         if pos:
             qty     = int(pos["netqty"])
             is_long = qty > 0
@@ -218,7 +220,7 @@ def process_symbol(
         return False
 
     # --- Manage existing position ---
-    pos = client.get_position(symbol)
+    pos = client.get_position(symbol, positions)
     if pos:
         qty       = int(pos["netqty"])
         avg_price = float(pos.get("averageprice", current_price))
@@ -299,7 +301,7 @@ def process_symbol(
         log.info(f"{symbol}: Monday — skipping new entries")
         return False
 
-    if client.already_traded_today(symbol):
+    if client.already_traded_today(symbol, orders):
         log.info(f"{symbol}: already traded today — skipping")
         return False
 
@@ -424,12 +426,22 @@ def run_india_orb() -> None:
     # --- Nifty trend filter (shared across all symbols) ---
     nifty_up, nifty_pct = client.get_nifty_trend()
 
-    # --- Manage all currently held positions first ---
+    # --- Fetch positions and order book once per cycle (rate-limit budget) ---
+    # position() limit: 1/s  |  orderBook() limit: 1/s
+    # Passing these cached lists down avoids N redundant API calls for N symbols.
     try:
         open_positions = client.get_positions()
     except Exception as e:
         log.error(f"Failed to fetch positions: {e}")
         open_positions = []
+
+    _time.sleep(1.1)  # respect 1/s limit before next call
+
+    try:
+        cached_orders = client.get_order_book()
+    except Exception as e:
+        log.error(f"Failed to fetch order book: {e}")
+        cached_orders = []
 
     # Pre-resolve tokens for held positions
     held_symbols: dict[str, str] = {}
@@ -440,8 +452,10 @@ def run_india_orb() -> None:
             held_symbols[raw_sym] = token
 
     for sym, tok in held_symbols.items():
+        _time.sleep(1.1)  # getCandleData limit: 3/s — held loop has no other throttle
         try:
-            process_symbol(sym, tok, nifty_up, len(open_positions), 0)
+            process_symbol(sym, tok, nifty_up, len(open_positions), 0,
+                           positions=open_positions, orders=cached_orders)
         except Exception as e:
             log.error(f"{sym}: unexpected error managing position — {e}")
 
@@ -458,11 +472,12 @@ def run_india_orb() -> None:
         return
 
     for symbol, token in today_tokens.items():
-        _time.sleep(1.5)  # throttle between symbols — avoid AngelOne burst rate limit
+        _time.sleep(1.5)  # getCandleData limit: 3/s, 180/min — 1.5s keeps us well under
         if symbol in held_symbols:
             continue  # already managed above
         try:
-            opened = process_symbol(symbol, token, nifty_up, open_count, max_positions)
+            opened = process_symbol(symbol, token, nifty_up, open_count, max_positions,
+                                    positions=open_positions, orders=cached_orders)
             if opened:
                 open_count += 1
         except Exception as e:
@@ -530,7 +545,7 @@ if __name__ == "__main__":
             today_tokens[_sym] = _tok
         else:
             log.warning(f"  {_sym}: token unresolvable — excluded from today's watchlist")
-        _time.sleep(0.5)
+        _time.sleep(1.2)  # searchScrip rate limit: 1/s — 1.2s gives safe headroom
     log.info(f"Today's watchlist ({len(today_tokens)}): {', '.join(today_tokens)}")
 
     log.info(
