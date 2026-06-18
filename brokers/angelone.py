@@ -57,6 +57,9 @@ class AngelOneClient:
         self._access_token: str = ""
         self._feed_token: str = ""
         self._token_cache: dict[str, str] = {}
+        # Populated by _load_scrip_master() inside connect()
+        # Maps base symbol (e.g. "RELIANCE") → token for NSE equity (-EQ) instruments
+        self._scrip_master: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Auth
@@ -77,6 +80,8 @@ class AngelOneClient:
             self._access_token = data.get("jwtToken", "")
             self._feed_token   = data.get("feedToken", "")
             log.info(f"AngelOne connected — client: {self._client_code}")
+            # Download full instrument list — eliminates searchScrip calls at startup
+            self._scrip_master = self._load_scrip_master()
             return True
         except Exception as e:
             log.error(f"AngelOne connect error: {e}")
@@ -91,15 +96,93 @@ class AngelOneClient:
             raise RuntimeError("AngelOneClient not connected — call connect() first")
 
     # ------------------------------------------------------------------
+    # Instrument master (downloaded once at connect)
+    # ------------------------------------------------------------------
+
+    _SCRIP_MASTER_URL = (
+        "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
+    )
+
+    def _load_scrip_master(self) -> dict[str, str]:
+        """
+        Download the full instrument list and build {base_symbol: token} for
+        NSE equity instruments (exch_seg=nse_cm, symbol ending in -EQ).
+        One HTTP call at connect-time eliminates all searchScrip calls at startup.
+        """
+        try:
+            resp = requests.get(self._SCRIP_MASTER_URL, timeout=30)
+            resp.raise_for_status()
+            instruments = resp.json()
+            out: dict[str, str] = {}
+            for item in instruments:
+                if item.get("exch_seg") != "nse_cm":
+                    continue
+                sym = item.get("symbol", "")
+                if not sym.endswith("-EQ"):
+                    continue
+                base = sym[:-3]   # strip "-EQ"
+                out[base] = str(item["token"])
+            log.info(f"ScripMaster loaded — {len(out)} NSE equity tokens available locally")
+            return out
+        except Exception as e:
+            log.warning(f"ScripMaster load failed ({e}) — will fall back to searchScrip")
+            return {}
+
+    def get_nse_intraday_symbols(self) -> set[str]:
+        """
+        Return the set of NSE symbol names approved for intraday (MIS) trading.
+        Use this to pre-filter the watchlist before token resolution.
+        Returns an empty set on failure (caller should allow all symbols through).
+        """
+        self._ensure_connected()
+        headers = self._rest_headers()
+        try:
+            resp = requests.get(
+                "https://apiconnect.angelone.in/rest/secure/angelbroking/marketData/v1/nseIntraday",
+                headers=headers,
+                timeout=10,
+            )
+            data = resp.json()
+            if not data.get("status"):
+                log.warning(f"nseIntraday: {data.get('message', 'unknown error')}")
+                return set()
+            symbols = {item["SymbolName"] for item in data.get("data", [])}
+            log.info(f"NSE intraday allowed: {len(symbols)} symbols")
+            return symbols
+        except Exception as e:
+            log.warning(f"nseIntraday fetch failed ({e}) — no intraday filter applied")
+            return set()
+
+    def _rest_headers(self) -> dict:
+        """Standard headers required for direct REST calls to AngelOne APIs."""
+        return {
+            "Authorization":    f"Bearer {self._access_token}",
+            "Content-Type":     "application/json",
+            "Accept":           "application/json",
+            "X-UserType":       "USER",
+            "X-SourceID":       "WEB",
+            "X-PrivateKey":     self._api_key,
+            "X-ClientLocalIP":  "127.0.0.1",
+            "X-ClientPublicIP": "127.0.0.1",
+            "X-MACAddress":     "00:00:00:00:00:00",
+        }
+
+    # ------------------------------------------------------------------
     # Symbol resolution: symbol → SmartAPI token
     # ------------------------------------------------------------------
 
     def resolve_token(self, symbol: str, exchange: str = "NSE") -> str | None:
         """
         Return the SmartAPI symboltoken for an NSE equity symbol.
-        Checks INDIA_TOKEN_MAP first (zero API calls for known symbols),
-        then falls back to searchScrip with EQ-preference and caching.
+        Priority:
+          1. ScripMaster (local, downloaded at connect — zero API calls)
+          2. INDIA_TOKEN_MAP in config (hardcoded fallback)
+          3. searchScrip API (last resort, 1/s rate limit applies)
         """
+        # ScripMaster covers all NSE equities — the fast path for 99% of symbols
+        if symbol in self._scrip_master:
+            return self._scrip_master[symbol]
+
         from config import INDIA_TOKEN_MAP
         if symbol in INDIA_TOKEN_MAP:
             return INDIA_TOKEN_MAP[symbol]
@@ -108,22 +191,22 @@ class AngelOneClient:
         if cache_key in self._token_cache:
             return self._token_cache[cache_key]
 
+        # searchScrip fallback — only reached for symbols missing from ScripMaster
         self._ensure_connected()
         for query in (f"{symbol}-EQ", symbol):
             try:
                 resp = self._obj.searchScrip(exchange, query)
                 hits = resp.get("data") or []
                 if hits:
-                    # Prefer exact SYMBOL-EQ equity match; fall back to first result
                     eq_name = f"{symbol}-EQ"
                     hit = next((h for h in hits if h.get("tradingsymbol") == eq_name), hits[0])
                     token = str(hit["symboltoken"])
                     self._token_cache[cache_key] = token
-                    log.debug(f"Token resolved: {symbol} → {token} ({hit['tradingsymbol']})")
+                    log.debug(f"Token resolved via searchScrip: {symbol} → {token}")
                     return token
             except Exception:
                 pass
-            time.sleep(0.3)
+            time.sleep(1.1)   # searchScrip: 1/s rate limit
 
         log.warning(f"Could not resolve SmartAPI token for {symbol}")
         return None
@@ -379,23 +462,11 @@ class AngelOneClient:
 
         token_to_sym = {tok: sym for sym, tok in token_map.items()}
         tokens = list(token_map.values())
-
-        headers = {
-            "Authorization":    f"Bearer {self._access_token}",
-            "Content-Type":     "application/json",
-            "Accept":           "application/json",
-            "X-UserType":       "USER",
-            "X-SourceID":       "WEB",
-            "X-PrivateKey":     self._api_key,
-            "X-ClientLocalIP":  "127.0.0.1",
-            "X-ClientPublicIP": "127.0.0.1",
-            "X-MACAddress":     "00:00:00:00:00:00",
-        }
         payload = {"mode": mode, "exchangeTokens": {exchange: tokens}}
         try:
             r = requests.post(
                 "https://apiconnect.angelone.in/rest/secure/angelbroking/market/v1/quote/",
-                headers=headers,
+                headers=self._rest_headers(),
                 json=payload,
                 timeout=10,
             )

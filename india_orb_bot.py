@@ -648,17 +648,30 @@ if __name__ == "__main__":
     log.info("Running pre-market screener (yfinance, ~10s)...")
     _screener_syms = get_active_nse_symbols()
 
+    # Filter to NSE intraday-allowed stocks only — prevents trying to trade
+    # stocks restricted from MIS/intraday orders on this session.
+    _intraday_ok = client.get_nse_intraday_symbols()
+    if _intraday_ok:
+        _before = len(_screener_syms)
+        _screener_syms = [s for s in _screener_syms if s in _intraday_ok]
+        log.info(
+            f"Intraday filter: {_before} → {len(_screener_syms)} symbols"
+            f" ({_before - len(_screener_syms)} excluded)"
+        )
+    else:
+        log.warning("NSE intraday list unavailable — no intraday filter applied")
+
     # Resolve SmartAPI tokens for all selected symbols upfront.
-    # INDIA_TOKEN_MAP handles known symbols instantly; new symbols call searchScrip.
-    # Done here (~08:50 IST) so tokens are ready before the 09:45 ORB window.
-    log.info(f"Resolving tokens for {len(_screener_syms)} symbols...")
+    # ScripMaster (downloaded in connect()) handles this locally — no API calls
+    # or rate-limit sleeps needed for the vast majority of NSE equity symbols.
+    # searchScrip is only reached for symbols absent from ScripMaster (rare).
+    log.info(f"Resolving tokens for {len(_screener_syms)} symbols (ScripMaster)...")
     for _sym in _screener_syms:
         _tok = client.resolve_token(_sym)
         if _tok:
             today_tokens[_sym] = _tok
         else:
             log.warning(f"  {_sym}: token unresolvable — excluded from today's watchlist")
-        _time.sleep(1.2)  # searchScrip rate limit: 1/s — 1.2s gives safe headroom
     log.info(f"Today's watchlist ({len(today_tokens)}): {', '.join(today_tokens)}")
 
     # --- Start WebSocket streaming -----------------------------------------------
