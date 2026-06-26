@@ -113,6 +113,24 @@ IC_PNL_STOP_MULTIPLE = 2.0  # P&L stop: close if total loss > 2× credit receive
 # NU: live loss — IC credit ratio only ~7%, options chain too illiquid at this price
 ORB_OPTIONS_BLOCKLIST = ['AAPL', 'MSFT', 'IWM', 'META', 'GME', 'NU']
 
+# Equity ORB blocklist — symbols excluded from the live screener for orb_bot.py.
+# Add any symbol the Yahoo Finance "most actives" screener surfaces that has no
+# backtest validation or that has caused stale/unmanaged positions in the past.
+# AAL: appeared via screener, held overnight due to missed EOD close — no ORB edge confirmed.
+# Low-price airline/bank stocks tend to have tiny OR ranges that produce unachievable targets.
+ORB_EQUITY_BLOCKLIST: list[str] = [
+    "AAL",    # American Airlines — no backtest edge; caused stale overnight position
+    "KVUE",   # Kenvue — no backtest edge; held stale overnight 2026-06-26
+    "PATH",   # UiPath — no backtest edge; held stale overnight 2026-06-26
+    "RKT",    # Rocket Companies — no backtest edge; held stale overnight 2026-06-26
+    "UVXY",   # Volatility ETF — not suitable for ORB (overnight gaps, inverse decay)
+    "SQQQ",   # Inverse ETF — gap risk, not ORB-compatible
+    "TQQQ",   # Leveraged ETF — decay, not ORB-compatible
+    "F",      # Ford — penny-range OR, targets never hit
+    "LCID",   # EV penny stock — high spread, unreliable fills
+    "PLUG",   # Fuel cell penny stock — no ORB edge
+]
+
 # Skip new entries on Mondays — backtest win rate 14.3% (vs 26–31% Tue–Thu).
 # OR ranges on Mondays are noisy (weekend gap, low early volume).
 SKIP_MONDAY_ENTRIES = True
