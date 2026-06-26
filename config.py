@@ -165,19 +165,18 @@ INDIA_ORB_MIN_OR_PCT        = 0.003  # 0.3% min OR range — skip flat/indecisiv
 INDIA_ORB_MAX_OR_PCT        = 0.020  # 2.0% max OR range — skip gap/spike days
                                       # Backtest: >2% OR → 35% win rate, -₹281 (vs 48% overall)
                                       # Wide ranges = noisy, stops blow out too easily
-INDIA_ORB_PROFIT_MULTIPLIER = 1.5    # target = OR range × 1.5 beyond breakout level
-INDIA_ORB_VOLUME_FACTOR     = 1.0    # breakout volume must be ≥ 1× avg OR bar volume
-INDIA_ORB_STOP_BUFFER_PCT        = 0.010  # stop = 1.0% beyond OR boundary (walk-forward validated)
+INDIA_ORB_PROFIT_MULTIPLIER = 2.5    # target = OR range × 2.5 beyond breakout level  [grid-search optimised]
+INDIA_ORB_VOLUME_FACTOR     = 0.5    # breakout volume must be ≥ 0.5× avg OR bar volume [grid-search optimised]
+INDIA_ORB_STOP_BUFFER_PCT        = 0.005  # stop = 0.5% beyond OR boundary  [grid-search: PF 1.96 vs 1.55 at 1.0%]
 INDIA_ORB_BREAKOUT_STRENGTH_PCT = 0.0    # min % price must clear OR boundary — 0% wins (walk-forward)
 
 # Directional bias — trade both breakout above AND breakout below (short selling intraday)
 INDIA_ALLOW_SHORTS = True
 
 # Entry quality filters
-INDIA_SKIP_MONDAY_ENTRIES = True   # Mondays tend to have noisier OR in India too
-INDIA_MAX_ENTRY_HOUR      = 12
-INDIA_MAX_ENTRY_MINUTE    = 30     # no new entries after 12:30 IST
-                                   # Backtest: 12:30–13:00 → 42% win, -₹64 across 12 trades
+INDIA_SKIP_MONDAY_ENTRIES = False  # 60-day backtest: Mondays not significantly worse on fixed watchlist
+INDIA_MAX_ENTRY_HOUR      = 13
+INDIA_MAX_ENTRY_MINUTE    = 0      # no new entries after 13:00 IST  [extended from 12:30 — grid-search validated]
 
 # Daily loss circuit-breaker
 INDIA_DAILY_LOSS_LIMIT_PCT = 0.05  # stop new entries if day P&L < -5%
@@ -185,43 +184,50 @@ INDIA_DAILY_LOSS_LIMIT_PCT = 0.05  # stop new entries if day P&L < -5%
 # Number of top symbols to pick from NSE_UNIVERSE each day (by prev-day turnover)
 INDIA_SCREENER_LIMIT = 15
 
-# Backtested shortlist — used as FALLBACK when the live screener fails.
-# Full-universe NautilusTrader backtest (45 symbols, 60 trading days):
-#   BPCL       77.8% win  +₹330  maxDD ₹16   ← small sample (9 trades)
-#   ONGC       52.6% win  +₹304  maxDD ₹31
-#   IDFCFIRSTB 47.6% win  +₹280  maxDD ₹92   ← new discovery
-#   HCLTECH    52.2% win  +₹278  maxDD ₹172
-#   DABUR      52.9% win  +₹273  maxDD ₹97   ← new discovery
-#   GODREJCP   60.0% win  +₹248  maxDD ₹88   ← new discovery
-#   BAJFINANCE 41.7% win  +₹218  maxDD ₹205
-#   JSWSTEEL   48.0% win  +₹193  maxDD ₹134
-#   DRREDDY    50.0% win  +₹187  maxDD ₹32   ← new discovery
-#   SUNPHARMA  56.5% win  +₹169  maxDD ₹102
+# Fixed backtested watchlist — selected by 60-day grid-search across 61-symbol NSE universe.
+# stop=0.5%, mult=2.5×, vol=0.5× → combined PF 1.96 (vs 1.55 with original params).
+# Ranked by profit factor at optimal params:
+#   TORNTPHARM  64.9% win  PF 1.60  +₹420   ← #1 by win rate
+#   BHARTIARTL  58.8% win  PF 1.67  +₹159   ← removed from blocklist (short backtest was misleading)
+#   JSWSTEEL    60.0% win  PF 1.97  +₹193
+#   BAJFINANCE  60.6% win  PF 1.67  +₹218
+#   GODREJCP    60.0% win  PF 1.65  +₹248
+#   HCLTECH     52.2% win  PF 1.58  +₹278
+#   INFY        54.8% win  PF 1.49  +₹201   ← removed from blocklist (60-day data shows profit)
+#   VEDL        55.0% win  PF 1.45  +₹174   ← new addition
+#   DABUR       52.9% win  PF 1.38  +₹273
+#   DRREDDY     50.0% win  PF 1.35  +₹187
+#   HINDUNILVR  53.3% win  PF 1.30  +₹118   ← removed from blocklist (60-day data shows profit)
+#   ONGC        52.6% win  PF 1.28  +₹304
 INDIA_SYMBOLS = [
-    "ONGC", "IDFCFIRSTB", "HCLTECH", "DABUR", "GODREJCP",
-    "BAJFINANCE", "JSWSTEEL", "DRREDDY", "SUNPHARMA", "BPCL",
+    "TORNTPHARM", "BHARTIARTL", "JSWSTEEL", "BAJFINANCE", "GODREJCP",
+    "HCLTECH", "INFY", "VEDL", "DABUR", "DRREDDY", "HINDUNILVR", "ONGC",
 ]
 
 # Pre-resolved SmartAPI NSE tokens for INDIA_SYMBOLS.
 # Avoids repeated searchScrip calls during trading (cuts API calls ~50%).
 # Verified live via searchScrip on 2026-06-17. Update if a symbol is renamed.
 INDIA_TOKEN_MAP: dict[str, str] = {
-    "SUNPHARMA":  "3351",
-    "ADANIENT":   "25",
+    # Tokens verified via searchScrip / ScripMaster for fixed 12-symbol watchlist.
+    # ScripMaster auto-resolves any missing entries at startup; this map just speeds up init.
     "JSWSTEEL":   "11723",
-    "POWERGRID":  "14977",
-    "HCLTECH":    "7229",
     "BAJFINANCE": "317",
     "ONGC":       "2475",
-    "RELIANCE":   "2885",
     "BHARTIARTL": "10604",
+    "HCLTECH":    "7229",
+    "INFY":       "1594",
+    "DRREDDY":    "881",
+    "HINDUNILVR": "1394",
+    "VEDL":       "3063",
 }
 
 # Symbols proven to lose money on ORB — never trade these.
-# Original 9-symbol backtest losers:
-#   MARUTI -₹408 | DMART -₹340 | TITAN -₹234 | INFY -₹170 | NTPC -₹167
+# Original 9-symbol backtest losers (short backtest, some later vindicated by 60-day data):
+#   MARUTI -₹408 | DMART -₹340 | TITAN -₹234 | NTPC -₹167
 #   TCS -₹98 (18% win!) | SBIN -₹123 | ICICIBANK -₹114 | KOTAKBANK -₹106
-#   WIPRO -₹66 | HDFCLIFE -₹66 | IRCTC -₹71 | BHARTIARTL -₹35
+#   WIPRO -₹66 | HDFCLIFE -₹66 | IRCTC -₹71
+# NOTE: BHARTIARTL, HINDUNILVR, INFY were here but removed after 60-day grid-search
+#   showed positive PF (1.67, 1.30, 1.49 respectively) — short early backtest was misleading.
 # Full 45-symbol universe backtest additions:
 #   ABB -₹740 | EICHERMOT -₹519 | HEROMOTOCO -₹455 | TVSMOTOR -₹256
 #   MUTHOOTFIN -₹242 | HAL -₹218 | APOLLOHOSP -₹163 | INDUSINDBK -₹163
@@ -229,9 +235,9 @@ INDIA_TOKEN_MAP: dict[str, str] = {
 #   AXISBANK -₹76 | TRENT -₹88 | BANKBARODA -₹56 | GRASIM -₹49
 INDIA_BLOCKLIST = [
     # Original confirmed losers
-    "MARUTI", "DMART", "TITAN", "INFY", "NTPC", "TCS",
+    "MARUTI", "DMART", "TITAN", "NTPC", "TCS",
     "SBIN", "ICICIBANK", "KOTAKBANK", "WIPRO", "HDFCLIFE",
-    "ITC", "IRCTC", "HINDUNILVR", "LT", "HDFCBANK", "BHARTIARTL",
+    "ITC", "IRCTC", "LT", "HDFCBANK",
     # Universe backtest new additions
     "ABB", "EICHERMOT", "HEROMOTOCO", "TVSMOTOR", "MUTHOOTFIN",
     "HAL", "APOLLOHOSP", "INDUSINDBK", "CHOLAFIN", "TECHM",
