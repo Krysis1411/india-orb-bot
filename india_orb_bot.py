@@ -470,9 +470,13 @@ def process_symbol(
             return False
 
         # ── Combined: record direction on first breakout bar, do NOT enter yet ──────
+        vol_ratio = current_volume / avg_or_volume if avg_or_volume > 0 else 0.0
         if symbol not in _orb_direction:
             _orb_direction[symbol] = "long"
-            log.info(f"{symbol}: ORB direction SET → LONG — waiting for VWAP pullback")
+            log.info(
+                f"{symbol}: ORB direction SET → LONG | Vol: {vol_ratio:.1f}× avg"
+                f" — waiting for VWAP pullback"
+            )
             return False
         if _orb_direction[symbol] != "long":
             return False  # daily bias is SHORT — skip this long signal
@@ -484,7 +488,8 @@ def process_symbol(
                 vwap, std = band
                 log.info(
                     f"{symbol}: ₹{current_price:.2f} outside VWAP zone"
-                    f" (VWAP ₹{vwap:.2f} ±₹{std:.2f}) — waiting for pullback"
+                    f" (VWAP ₹{vwap:.2f} ±₹{std:.2f}) | Vol: {vol_ratio:.1f}× avg"
+                    f" — waiting for pullback"
                 )
             return False
 
@@ -529,9 +534,13 @@ def process_symbol(
             return False
 
         # ── Combined: record direction on first breakout bar, do NOT enter yet ──────
+        vol_ratio = current_volume / avg_or_volume if avg_or_volume > 0 else 0.0
         if symbol not in _orb_direction:
             _orb_direction[symbol] = "short"
-            log.info(f"{symbol}: ORB direction SET → SHORT — waiting for VWAP pullback")
+            log.info(
+                f"{symbol}: ORB direction SET → SHORT | Vol: {vol_ratio:.1f}× avg"
+                f" — waiting for VWAP pullback"
+            )
             return False
         if _orb_direction[symbol] != "short":
             return False  # daily bias is LONG — skip this short signal
@@ -543,7 +552,8 @@ def process_symbol(
                 vwap, std = band
                 log.info(
                     f"{symbol}: ₹{current_price:.2f} outside VWAP zone"
-                    f" (VWAP ₹{vwap:.2f} ±₹{std:.2f}) — waiting for pullback"
+                    f" (VWAP ₹{vwap:.2f} ±₹{std:.2f}) | Vol: {vol_ratio:.1f}× avg"
+                    f" — waiting for pullback"
                 )
             return False
 
