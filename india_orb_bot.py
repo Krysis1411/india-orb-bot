@@ -4,15 +4,18 @@ India ORB (Opening Range Breakout) day trading bot — AngelOne SmartAPI.
 ⚠️  REAL MONEY: AngelOne SmartAPI connects to a live brokerage account.
     Use --dry-run to test without placing actual orders.
 
-Strategy
---------
-Opening range : first 6 × 5-min bars (9:15–9:45 IST)
-Entry         : close breaks above OR high AND bar volume >= avg OR vol × factor
-Stop          : OR low × (1 - INDIA_ORB_STOP_BUFFER_PCT)
-Target        : OR high + (OR range × INDIA_ORB_PROFIT_MULTIPLIER)
-EOD close     : force-close all MIS positions at INDIA_CLOSE_HOUR:INDIA_CLOSE_MINUTE IST
-One trade/day : skip entry if we already have a filled BUY order for this symbol today
-Nifty filter  : only enter when Nifty 50 session-to-date return > 0 (trending up)
+Strategy — ORB + VWAP + EMA Combined
+--------------------------------------
+Opening range   : first 6 × 5-min bars (9:15–9:45 IST)
+Signal 1 (ORB)  : first close above OR high / below OR low → sets daily direction bias
+                  NO entry on this bar — direction recorded, not acted on immediately
+Signal 2 (VWAP) : entry only when price is within ±1σ of session VWAP  [REQUIRED gate]
+Signal 3 (EMA)  : EMA 9 > EMA 21 confirms direction → position size ×1.5  [optional]
+Stop            : OR low × (1 − INDIA_ORB_STOP_BUFFER_PCT)
+Target          : OR high + (OR range × INDIA_ORB_PROFIT_MULTIPLIER)
+EOD close       : force-close all MIS positions at INDIA_CLOSE_HOUR:INDIA_CLOSE_MINUTE IST
+One trade/day   : skip entry if we already have a filled order for this symbol today
+Nifty filter    : only enter when Nifty 50 session-to-date return > 0 (trending up)
 
 Usage
 -----
@@ -68,6 +71,24 @@ _sl_orders: dict[str, str] = {}
 # Reset each session (dict is empty at startup).
 _trailing_activated: dict[str, bool] = {}
 
+# ---------------------------------------------------------------------------
+# Combined strategy state (ORB direction bias + VWAP + EMA)
+# ---------------------------------------------------------------------------
+
+# ORB direction set on FIRST breakout bar — sticky for the session, not traded on.
+# "long" | "short"; absent until first breakout is detected.
+_orb_direction: dict[str, str] = {}
+
+# Session VWAP state per symbol — naturally reset when bot restarts each morning.
+# Stores cumulative typical-price×volume, cumulative volume, and typical-price list
+# for std-dev calculation.
+_vwap_state: dict[str, dict] = {}
+
+# EMA 9/21 state per symbol — persists for the bot process lifetime.
+# Each entry: {ema9, ema21, bars_seen, processed}
+# processed = count of bars already fed in (avoids re-processing on repeat fetches).
+_ema_state: dict[str, dict] = {}
+
 # Opening-range cache: computed once after 09:45 and reused all day.
 # Keys: symbol. Values: {or_high, or_low, avg_or_volume}.
 # Avoids repeated getCandleData calls for OR data that never changes after 09:45.
@@ -116,6 +137,79 @@ MARKET_CLOSE_IST = time(15, 30)
 
 # AngelOne client — authenticated once at startup
 client = AngelOneClient()
+
+
+# ---------------------------------------------------------------------------
+# Combined strategy helpers — VWAP + EMA
+# ---------------------------------------------------------------------------
+
+def _update_vwap_from_bars(symbol: str, bars) -> None:
+    """Recompute session VWAP and std from all available today's bars."""
+    state = _vwap_state.setdefault(symbol, {})
+    cum_tpv = 0.0
+    cum_vol = 0.0
+    tp_list: list[float] = []
+    for _, row in bars.iterrows():
+        tp  = (float(row["high"]) + float(row["low"]) + float(row["close"])) / 3.0
+        vol = float(row["volume"])
+        if vol > 0:
+            cum_tpv += tp * vol
+            cum_vol  += vol
+        tp_list.append(tp)
+    state["cum_tpv"] = cum_tpv
+    state["cum_vol"]  = cum_vol
+    state["tp_list"]  = tp_list
+
+
+def _get_vwap_band(symbol: str) -> tuple[float, float] | None:
+    """Return (vwap, std) or None if insufficient data."""
+    state = _vwap_state.get(symbol)
+    if not state or state.get("cum_vol", 0) == 0 or len(state.get("tp_list", [])) < 2:
+        return None
+    vwap    = state["cum_tpv"] / state["cum_vol"]
+    tp_list = state["tp_list"]
+    mean    = sum(tp_list) / len(tp_list)
+    std     = (sum((x - mean) ** 2 for x in tp_list) / len(tp_list)) ** 0.5
+    return vwap, max(std, vwap * 0.001)   # floor at 0.1% of price to avoid zero-band
+
+
+def _in_vwap_zone(symbol: str, price: float, sigma: float = 1.0) -> bool:
+    """True if price is within ±sigma·std of session VWAP. Defaults True if no data."""
+    band = _get_vwap_band(symbol)
+    if band is None:
+        return True
+    vwap, std = band
+    return abs(price - vwap) <= sigma * std
+
+
+def _update_ema_from_bars(symbol: str, bars) -> None:
+    """Feed new (unprocessed) bars into EMA 9/21 — skips bars already seen."""
+    state = _ema_state.setdefault(
+        symbol, {"ema9": None, "ema21": None, "bars_seen": 0, "processed": 0}
+    )
+    already = state["processed"]
+    if len(bars) <= already:
+        return
+    for _, row in bars.iloc[already:].iterrows():
+        close = float(row["close"])
+        state["bars_seen"] += 1
+        if state["ema9"] is None:
+            state["ema9"]  = close
+            state["ema21"] = close
+        else:
+            state["ema9"]  = 0.2    * close + 0.8    * state["ema9"]
+            state["ema21"] = (2/22) * close + (20/22) * state["ema21"]
+    state["processed"] = len(bars)
+
+
+def _ema_agrees(symbol: str, direction: str) -> bool:
+    """True if EMA 9 confirms direction vs EMA 21 (requires 9-bar warmup)."""
+    state = _ema_state.get(symbol)
+    if not state or state["bars_seen"] < 9 or state["ema9"] is None:
+        return False
+    if direction == "long":
+        return state["ema9"] > state["ema21"]
+    return state["ema9"] < state["ema21"]
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +323,8 @@ def process_symbol(
             return False
         current_price  = float(bars.iloc[-1]["close"])
         current_volume = float(bars.iloc[-1]["volume"])
+        _update_vwap_from_bars(symbol, bars)
+        _update_ema_from_bars(symbol, bars)
     now            = now_ist()
     trade_qty      = max(1, int(INDIA_POSITION_SIZE_INR / current_price))
 
@@ -349,10 +445,15 @@ def process_symbol(
     if nifty_up is None:
         log.warning(f"Nifty data unavailable — entries proceed without trend filter")
 
-    # Volume confirmation — fetch current bar if not already available
+    # Volume confirmation + VWAP/EMA update — fetch current bars if not already available
     if current_volume is None:
         _bars = client.get_today_candles(symbol, token)
-        current_volume = float(_bars.iloc[-1]["volume"]) if _bars is not None else 0.0
+        if _bars is not None:
+            current_volume = float(_bars.iloc[-1]["volume"])
+            _update_vwap_from_bars(symbol, _bars)
+            _update_ema_from_bars(symbol, _bars)
+        else:
+            current_volume = 0.0
 
     vol_ok = current_volume >= avg_or_volume * INDIA_ORB_VOLUME_FACTOR
 
@@ -367,22 +468,52 @@ def process_symbol(
         if current_price >= long_target:
             log.info(f"{symbol}: stale long breakout — already past target")
             return False
+
+        # ── Combined: record direction on first breakout bar, do NOT enter yet ──────
+        if symbol not in _orb_direction:
+            _orb_direction[symbol] = "long"
+            log.info(f"{symbol}: ORB direction SET → LONG — waiting for VWAP pullback")
+            return False
+        if _orb_direction[symbol] != "long":
+            return False  # daily bias is SHORT — skip this long signal
+
+        # ── VWAP proximity gate (required) ─────────────────────────────────────────
+        if not _in_vwap_zone(symbol, current_price):
+            band = _get_vwap_band(symbol)
+            if band:
+                vwap, std = band
+                log.info(
+                    f"{symbol}: ₹{current_price:.2f} outside VWAP zone"
+                    f" (VWAP ₹{vwap:.2f} ±₹{std:.2f}) — waiting for pullback"
+                )
+            return False
+
+        # ── EMA confirmation (optional ×1.5 boost) ─────────────────────────────────
+        if _ema_agrees(symbol, "long"):
+            entry_qty  = max(1, int(INDIA_POSITION_SIZE_INR * 1.5 / current_price))
+            entry_type = "vwap_ema_confluence"
+        else:
+            entry_qty  = trade_qty
+            entry_type = "vwap_pullback"
+
         if DRY_RUN:
             log.info(
-                f"[DRY RUN] BUY {trade_qty} {symbol} | ₹{current_price:.2f}"
+                f"[DRY RUN] BUY {entry_qty} {symbol} [{entry_type}] | ₹{current_price:.2f}"
                 f" | Stop: ₹{long_stop:.2f} | Target: ₹{long_target:.2f}"
                 f" | Vol: {current_volume/avg_or_volume:.1f}×"
             )
             log.info(
-                f"[DRY RUN] SL ORDER — SELL {trade_qty} {symbol}"
+                f"[DRY RUN] SL ORDER — SELL {entry_qty} {symbol}"
                 f" trigger ₹{long_stop:.2f} (exchange-level STOPLOSS_MARKET)"
             )
             return True
-        order_id = client.place_market_order(symbol, token, "BUY", trade_qty)
+        order_id = client.place_market_order(symbol, token, "BUY", entry_qty)
         if order_id:
-            log.info(f"LONG BREAKOUT {trade_qty} {symbol} | ₹{current_price:.2f} | Stop: ₹{long_stop:.2f} | Target: ₹{long_target:.2f}")
-            # Place exchange-level SL immediately (SELL trigger at long_stop)
-            sl_id = client.place_sl_order(symbol, token, "SELL", trade_qty, long_stop)
+            log.info(
+                f"LONG BREAKOUT [{entry_type}] {entry_qty} {symbol}"
+                f" | ₹{current_price:.2f} | Stop: ₹{long_stop:.2f} | Target: ₹{long_target:.2f}"
+            )
+            sl_id = client.place_sl_order(symbol, token, "SELL", entry_qty, long_stop)
             if sl_id:
                 _sl_orders[symbol] = sl_id
             return True
@@ -396,22 +527,52 @@ def process_symbol(
         if short_target <= 0 or current_price <= short_target:
             log.info(f"{symbol}: stale short breakout — already past target")
             return False
+
+        # ── Combined: record direction on first breakout bar, do NOT enter yet ──────
+        if symbol not in _orb_direction:
+            _orb_direction[symbol] = "short"
+            log.info(f"{symbol}: ORB direction SET → SHORT — waiting for VWAP pullback")
+            return False
+        if _orb_direction[symbol] != "short":
+            return False  # daily bias is LONG — skip this short signal
+
+        # ── VWAP proximity gate (required) ─────────────────────────────────────────
+        if not _in_vwap_zone(symbol, current_price):
+            band = _get_vwap_band(symbol)
+            if band:
+                vwap, std = band
+                log.info(
+                    f"{symbol}: ₹{current_price:.2f} outside VWAP zone"
+                    f" (VWAP ₹{vwap:.2f} ±₹{std:.2f}) — waiting for pullback"
+                )
+            return False
+
+        # ── EMA confirmation (optional ×1.5 boost) ─────────────────────────────────
+        if _ema_agrees(symbol, "short"):
+            entry_qty  = max(1, int(INDIA_POSITION_SIZE_INR * 1.5 / current_price))
+            entry_type = "vwap_ema_confluence"
+        else:
+            entry_qty  = trade_qty
+            entry_type = "vwap_pullback"
+
         if DRY_RUN:
             log.info(
-                f"[DRY RUN] SELL SHORT {trade_qty} {symbol} | ₹{current_price:.2f}"
+                f"[DRY RUN] SELL SHORT {entry_qty} {symbol} [{entry_type}] | ₹{current_price:.2f}"
                 f" | Stop: ₹{short_stop:.2f} | Target: ₹{short_target:.2f}"
                 f" | Vol: {current_volume/avg_or_volume:.1f}×"
             )
             log.info(
-                f"[DRY RUN] SL ORDER — BUY {trade_qty} {symbol}"
+                f"[DRY RUN] SL ORDER — BUY {entry_qty} {symbol}"
                 f" trigger ₹{short_stop:.2f} (exchange-level STOPLOSS_MARKET)"
             )
             return True
-        order_id = client.place_market_order(symbol, token, "SELL", trade_qty)
+        order_id = client.place_market_order(symbol, token, "SELL", entry_qty)
         if order_id:
-            log.info(f"SHORT BREAKOUT {trade_qty} {symbol} | ₹{current_price:.2f} | Stop: ₹{short_stop:.2f} | Target: ₹{short_target:.2f}")
-            # Place exchange-level SL immediately (BUY trigger at short_stop)
-            sl_id = client.place_sl_order(symbol, token, "BUY", trade_qty, short_stop)
+            log.info(
+                f"SHORT BREAKOUT [{entry_type}] {entry_qty} {symbol}"
+                f" | ₹{current_price:.2f} | Stop: ₹{short_stop:.2f} | Target: ₹{short_target:.2f}"
+            )
+            sl_id = client.place_sl_order(symbol, token, "BUY", entry_qty, short_stop)
             if sl_id:
                 _sl_orders[symbol] = sl_id
             return True
@@ -546,6 +707,8 @@ def run_india_orb() -> None:
                     _or_cache[sym] = {"or_high": 0, "or_low": 0, "avg_or_volume": 0, "skip": True}
                 else:
                     _or_cache[sym] = {"or_high": or_high, "or_low": or_low, "avg_or_volume": avg_or_vol}
+                    _update_vwap_from_bars(sym, bars)
+                    _update_ema_from_bars(sym, bars)
                     log.info(f"  {sym}: OR ₹{or_low:.2f}–₹{or_high:.2f} ({or_pct:.2%})")
 
     # --- Manage held positions (use batch LTP — no getCandleData needed) ----------
@@ -693,13 +856,14 @@ if __name__ == "__main__":
     log.info("WebSocket streaming started — prices will update in real-time")
 
     log.info(
-        f"India ORB Bot | OR: first {INDIA_ORB_RANGE_BARS}×5-min bars (09:15–09:45 IST)"
-        f" | ₹{INDIA_POSITION_SIZE_INR:,}/trade"
+        f"India Combined Bot (ORB+VWAP+EMA) | OR: first {INDIA_ORB_RANGE_BARS}×5-min bars (09:15–09:45 IST)"
+        f" | ₹{INDIA_POSITION_SIZE_INR:,}/trade (×1.5 with EMA confluence)"
         f" | Entry window: 09:45–{INDIA_MAX_ENTRY_HOUR}:{INDIA_MAX_ENTRY_MINUTE:02d} IST"
         f" | EOD close: {INDIA_CLOSE_HOUR}:{INDIA_CLOSE_MINUTE:02d} IST"
     )
     log.info(
-        f"Filters: Nifty trend | min OR {INDIA_ORB_MIN_OR_PCT:.1%}"
+        f"Signals: [1] ORB direction bias → [2] VWAP ±1σ gate (required) → [3] EMA 9/21 boost (optional)"
+        f" | Nifty filter | min OR {INDIA_ORB_MIN_OR_PCT:.1%}"
         f" | vol {INDIA_ORB_VOLUME_FACTOR}× | target {INDIA_ORB_PROFIT_MULTIPLIER}×"
         f" | stop {INDIA_ORB_STOP_BUFFER_PCT:.1%} below OR low"
     )
