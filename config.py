@@ -160,14 +160,12 @@ INDIA_CLOSE_HOUR   = 15
 INDIA_CLOSE_MINUTE = 10
 
 # Capital allocation per trade (INR)
-# At ₹15,000 total budget: 1 position at full size beats 3 × ₹5,000.
-# Flat ₹5 brokerage means charges are proportionally smaller on larger positions:
-#   ₹5,000/trade → charges 0.26% per trip  (charge-negative vs avg gross P&L)
-#   ₹15,000/trade → charges 0.12% per trip (much closer to break-even)
-# Increase INDIA_POSITION_SIZE_INR as account equity grows.
-INDIA_POSITION_SIZE_INR    = 15000  # ₹15,000 per trade (full budget in one position)
-INDIA_MAX_TOTAL_INR        = 15000  # max deployed at once
-INDIA_MAX_OPEN_POSITIONS   = 1      # only 1 concurrent position at this budget
+# Current budget: ₹15,000 total → 3 concurrent positions × ₹5,000 each.
+# As account equity grows, increase both values together:
+#   ₹30k budget → ₹10k/trade, max 3  |  ₹75k budget → ₹25k/trade, max 3
+INDIA_POSITION_SIZE_INR    = 5000   # ₹5,000 per trade
+INDIA_MAX_TOTAL_INR        = 15000  # max ₹15,000 deployed at once
+INDIA_MAX_OPEN_POSITIONS   = 3      # max concurrent positions
 
 # ORB quality filters
 INDIA_ORB_MIN_OR_PCT        = 0.003  # 0.3% min OR range — skip flat/indecisive opens
