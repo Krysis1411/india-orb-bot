@@ -810,7 +810,6 @@ if __name__ == "__main__":
         raise SystemExit(1)
 
     # Snapshot starting equity for daily P&L circuit-breaker
-    global _session_start_equity
     _session_start_equity = client.get_available_funds_inr()
     log.info(
         f"Session start equity: ₹{_session_start_equity:,.2f}"
