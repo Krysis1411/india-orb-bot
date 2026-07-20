@@ -41,6 +41,7 @@ from config import (
     INDIA_DAILY_LOSS_LIMIT_PCT,
     INDIA_MAX_ENTRY_HOUR,
     INDIA_MAX_ENTRY_MINUTE,
+    INDIA_MAX_OPEN_POSITIONS,
     INDIA_MAX_TOTAL_INR,
     INDIA_ORB_BREAKOUT_STRENGTH_PCT,
     INDIA_ORB_MAX_OR_PCT,
@@ -505,7 +506,7 @@ def run_india_orb() -> None:
             held_symbols[raw_sym] = token
 
     open_count    = len(open_positions)
-    max_positions = max(1, int(INDIA_MAX_TOTAL_INR / INDIA_POSITION_SIZE_INR))
+    max_positions = INDIA_MAX_OPEN_POSITIONS
 
     # --- Live prices: WebSocket cache (zero API calls) ---
     # The background WebSocket thread updates _ws.prices on every tick.

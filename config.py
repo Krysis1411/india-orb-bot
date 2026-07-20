@@ -152,13 +152,22 @@ MIN_BREAKOUT_STRENGTH_PCT = 0.005  # price must be ≥ 0.5% beyond OR high/low
 # Opening range = first 6 × 5-min bars (09:15–09:45 IST)
 INDIA_ORB_RANGE_BARS = 6
 
-# EOD close: 15 min before NSE MIS auto-squareoff at 15:30 IST
+# EOD close: 20 min before NSE MIS auto-squareoff at 15:30 IST.
+# Previously 15:15 — orders placed at 15:15-16 were REJECTED because the broker's
+# own squareoff system was already competing for the same positions.
+# Moving to 15:10 gives a clean 20-min buffer before broker auto-squareoff.
 INDIA_CLOSE_HOUR   = 15
-INDIA_CLOSE_MINUTE = 15
+INDIA_CLOSE_MINUTE = 10
 
 # Capital allocation per trade (INR)
-INDIA_POSITION_SIZE_INR = 5000    # ₹5,000 per trade
-INDIA_MAX_TOTAL_INR     = 15000   # max ₹15,000 deployed at once → 3 concurrent trades
+# At ₹15,000 total budget: 1 position at full size beats 3 × ₹5,000.
+# Flat ₹5 brokerage means charges are proportionally smaller on larger positions:
+#   ₹5,000/trade → charges 0.26% per trip  (charge-negative vs avg gross P&L)
+#   ₹15,000/trade → charges 0.12% per trip (much closer to break-even)
+# Increase INDIA_POSITION_SIZE_INR as account equity grows.
+INDIA_POSITION_SIZE_INR    = 15000  # ₹15,000 per trade (full budget in one position)
+INDIA_MAX_TOTAL_INR        = 15000  # max deployed at once
+INDIA_MAX_OPEN_POSITIONS   = 1      # only 1 concurrent position at this budget
 
 # ORB quality filters
 INDIA_ORB_MIN_OR_PCT        = 0.003  # 0.3% min OR range — skip flat/indecisive opens
