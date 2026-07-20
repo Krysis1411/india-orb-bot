@@ -104,7 +104,7 @@ today_tokens: dict[str, str] = {}
 
 # Live WebSocket feed — started after token resolution; None until then.
 # Prices are updated in real-time by a background thread.
-_ws: AngelOneWebSocket | None = None
+_ws = None
 
 # Special key for the Nifty 50 index in the WebSocket price cache.
 _NIFTY_WS_KEY = "__NIFTY50__"
@@ -852,7 +852,6 @@ if __name__ == "__main__":
     # A background daemon thread keeps the connection alive and updates _ws.prices.
     # The main loop reads _ws.prices instead of calling REST batch quote each cycle.
     from brokers.angelone import _NIFTY50_FALLBACK_TOKEN
-    global _ws
     _ws_token_map = dict(today_tokens)
     _ws_token_map[_NIFTY_WS_KEY] = _NIFTY50_FALLBACK_TOKEN   # Nifty 50 index
     _ws = AngelOneWebSocket(
