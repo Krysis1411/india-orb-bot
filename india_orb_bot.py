@@ -95,7 +95,7 @@ _ema_state: dict[str, dict] = {}
 _or_cache: dict[str, dict] = {}
 
 # Session-start equity — set once at startup for daily P&L tracking.
-_session_start_equity: float = 0.0
+_session_start_equity = 0.0
 
 # Populated once at startup by the pre-market screener.
 # Maps symbol → SmartAPI token for today's watchlist.
