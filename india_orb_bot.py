@@ -55,6 +55,10 @@ from config import (
     INDIA_ORB_VOLUME_FACTOR,
     INDIA_POSITION_SIZE_INR,
     INDIA_SKIP_MONDAY_ENTRIES,
+    INDIA_DUAL_THRUST_DAYS,
+    INDIA_DUAL_THRUST_MAX_MULTIPLE,
+    INDIA_SAR_AF_STEP,
+    INDIA_SAR_AF_MAX,
 )
 from india_screener import get_active_nse_symbols
 import india_performance as perf
@@ -118,6 +122,11 @@ _realized_pnl = 0.0
 _session_trades = 0
 _session_wins = 0
 _session_losses = 0
+
+# Parabolic SAR state per symbol — initialized at entry, cleared at close.
+# Keys: symbol. Values: {sar, extreme, af}
+# SAR starts at the initial stop level and trails price as new extremes are made.
+_sar_state: dict[str, dict] = {}
 
 # Populated once at startup by the pre-market screener.
 # Maps symbol → SmartAPI token for today's watchlist.
@@ -232,6 +241,104 @@ def _ema_agrees(symbol: str, direction: str) -> bool:
     if direction == "long":
         return state["ema9"] > state["ema21"]
     return state["ema9"] < state["ema21"]
+
+
+# ---------------------------------------------------------------------------
+# Parabolic SAR trailing stop
+# ---------------------------------------------------------------------------
+
+def _sar_init(symbol: str, initial_stop: float, entry_price: float) -> None:
+    """Initialise SAR state at position entry."""
+    _sar_state[symbol] = {
+        "sar":     initial_stop,
+        "extreme": entry_price,
+        "af":      INDIA_SAR_AF_STEP,
+    }
+
+
+def _sar_update(symbol: str, current_price: float, is_long: bool) -> tuple[float, bool]:
+    """
+    Advance Parabolic SAR one tick and return (sar_level, fired).
+
+    Long:  SAR rises toward the highest high; fired when price ≤ SAR.
+    Short: SAR falls toward the lowest low;   fired when price ≥ SAR.
+
+    AF starts at INDIA_SAR_AF_STEP and increases by AF_STEP each time a new
+    extreme is reached, up to INDIA_SAR_AF_MAX (Wilder defaults 0.02 / 0.20).
+    """
+    state = _sar_state.get(symbol)
+    if not state:
+        return 0.0, False
+
+    sar     = state["sar"]
+    extreme = state["extreme"]
+    af      = state["af"]
+
+    if is_long:
+        if current_price > extreme:
+            extreme = current_price
+            af = min(af + INDIA_SAR_AF_STEP, INDIA_SAR_AF_MAX)
+    else:
+        if current_price < extreme:
+            extreme = current_price
+            af = min(af + INDIA_SAR_AF_STEP, INDIA_SAR_AF_MAX)
+
+    # SAR converges toward extreme: for longs SAR rises; for shorts SAR falls
+    new_sar = sar + af * (extreme - sar)
+
+    # Guard: SAR must remain on the protective side of current price
+    if is_long:
+        new_sar = min(new_sar, current_price)
+    else:
+        new_sar = max(new_sar, current_price)
+
+    state["sar"]     = new_sar
+    state["extreme"] = extreme
+    state["af"]      = af
+
+    fired = (current_price <= new_sar) if is_long else (current_price >= new_sar)
+    return new_sar, fired
+
+
+# ---------------------------------------------------------------------------
+# Dual Thrust expected-range filter (India)
+# ---------------------------------------------------------------------------
+
+_dt_cache_india: dict[str, float | None] = {}
+
+
+def _compute_dual_thrust_india(symbol: str) -> float | None:
+    """
+    Dual Thrust expected daily range for an NSE symbol over prior INDIA_DUAL_THRUST_DAYS days.
+
+    Formula: max(HH − LC, HC − LL)
+    HH = highest high | LL = lowest low | HC = highest close | LC = lowest close
+
+    Fetches via yfinance ({symbol}.NS) and caches per session.
+    Returns None when data is unavailable — the gate is skipped in that case.
+    """
+    if symbol in _dt_cache_india:
+        return _dt_cache_india[symbol]
+    try:
+        import yfinance as yf
+        n = INDIA_DUAL_THRUST_DAYS
+        hist = yf.Ticker(f"{symbol}.NS").history(period=f"{n + 5}d", interval="1d", auto_adjust=True)
+        if len(hist) > 1:
+            hist = hist.iloc[:-1]   # drop today's potentially-partial bar
+        hist = hist.tail(n)
+        if len(hist) < n:
+            _dt_cache_india[symbol] = None
+            return None
+        hh = float(hist["High"].max())
+        ll = float(hist["Low"].min())
+        hc = float(hist["Close"].max())
+        lc = float(hist["Close"].min())
+        dt_range = max(hh - lc, hc - ll)
+        _dt_cache_india[symbol] = dt_range
+        return dt_range
+    except Exception:
+        _dt_cache_india[symbol] = None
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +491,8 @@ def process_symbol(
             abs_qty = abs(qty)
             if abs_qty > 0:
                 cancel_sl(symbol)  # must cancel SL before placing exit order
+                _sar_state.pop(symbol, None)
+                _trailing_activated.pop(symbol, None)
                 # Record estimated realized P&L using current price as exit
                 data = _entry_data.pop(symbol, {})
                 entry_px_rec = data.get("price", current_price)
@@ -418,6 +527,8 @@ def process_symbol(
     # Detect positions that were closed externally (exchange SL fired, or broker EOD sweep).
     # If we have a recorded entry but the position is now flat, estimate and log realized P&L.
     if symbol in _entry_data and (pos is None or int(pos.get("netqty", 0)) == 0):
+        _sar_state.pop(symbol, None)
+        _trailing_activated.pop(symbol, None)
         data = _entry_data.pop(symbol)
         entry_px = data["price"]
         entry_qty_stored = data["qty"]
@@ -459,15 +570,29 @@ def process_symbol(
             hit_target = current_price <= short_target
             close_side = "BUY"
 
-        if hit_stop or hit_target:
-            reason = "TAKE PROFIT" if hit_target else "STOP LOSS"
-            # For TAKE PROFIT: cancel SL order then exit at market
-            # For STOP LOSS:   the SL order already fired at exchange; just clean up
+        # --- Parabolic SAR trailing exit ---
+        # SAR is updated every polling cycle. It starts at the initial stop level
+        # and converges toward the running price extreme. When price reverses through
+        # the SAR level the trade is exited — even if still between stop and TP.
+        # The exchange-level SL remains as the gap-down floor; SAR handles slow reversals.
+        sar_level = 0.0
+        sar_fired = False
+        if symbol in _sar_state:
+            sar_level, sar_fired = _sar_update(symbol, current_price, is_long)
+
+        if hit_stop or hit_target or sar_fired:
+            if sar_fired and not hit_stop and not hit_target:
+                reason = "SAR TRAIL"
+            else:
+                reason = "TAKE PROFIT" if hit_target else "STOP LOSS"
+            # For TAKE PROFIT / SAR: cancel SL order then exit at market
+            # For STOP LOSS:         the SL order already fired at exchange; just clean up
             cancel_sl(symbol)
             _trailing_activated.pop(symbol, None)
+            _sar_state.pop(symbol, None)
 
-            # Record realized P&L: use actual exit price (current for TP; SL trigger for SL)
-            exit_px = current_price if hit_target else (long_stop if is_long else short_stop)
+            # Record realized P&L: use actual exit price (current for TP/SAR; SL trigger for SL)
+            exit_px = current_price if (hit_target or sar_fired) else (long_stop if is_long else short_stop)
             data = _entry_data.pop(symbol, {})
             entry_px_rec = data.get("price", avg_price)
             qty_rec = data.get("qty", abs_qty)
@@ -481,45 +606,46 @@ def process_symbol(
 
             if DRY_RUN:
                 log.info(f"[DRY RUN] {reason} — {close_side} {abs_qty} {symbol} at ~₹{current_price:.2f} | P&L: {pnl_pct:+.2f}%")
-            elif hit_target:
+            elif hit_target or sar_fired:
                 client.place_market_order(symbol, token, close_side, abs_qty)
                 log.info(f"{reason} — {close_side} {abs_qty} {symbol} at ~₹{current_price:.2f} | P&L: {pnl_pct:+.2f}%")
             else:
                 log.info(f"{reason} — exchange SL order fired for {symbol} | P&L: {pnl_pct:+.2f}%")
             return False
 
-        # --- Trailing stop: move SL to breakeven once price clears 0.5× target ---
+        # --- Trailing stop: move exchange SL to breakeven once price clears 0.5× target ---
+        # This protects against gap-downs between polling cycles (SAR only fires on next poll).
+        # SAR provides the soft trailing exit; breakeven SL provides the hard floor.
         if not _trailing_activated.get(symbol, False):
             if is_long:
                 half_target = or_high + or_range * INDIA_ORB_PROFIT_MULTIPLIER * 0.5
                 if current_price >= half_target:
                     _trailing_activated[symbol] = True
                     cancel_sl(symbol)  # cancel original stop
-                    # Place SL at breakeven minus 0.1% buffer to avoid immediate trigger
-                    be_price = avg_price * 0.999
+                    be_price = avg_price * 0.999   # 0.1% buffer to avoid immediate trigger
                     if DRY_RUN:
-                        log.info(f"[DRY RUN] {symbol}: trailing stop — SL moved to ₹{be_price:.2f} (breakeven ₹{avg_price:.2f} −0.1%)")
+                        log.info(f"[DRY RUN] {symbol}: breakeven SL — ₹{be_price:.2f} (entry ₹{avg_price:.2f} −0.1%)")
                     else:
                         new_sl = client.place_sl_order(symbol, token, "SELL", abs_qty, be_price)
                         if new_sl:
                             _sl_orders[symbol] = new_sl
-                        log.info(f"{symbol}: trailing stop — SL moved to ₹{be_price:.2f} (breakeven ₹{avg_price:.2f} −0.1%)")
+                        log.info(f"{symbol}: breakeven SL — ₹{be_price:.2f} (entry ₹{avg_price:.2f} −0.1%)")
             else:  # short
                 half_target = or_low - or_range * INDIA_ORB_PROFIT_MULTIPLIER * 0.5
                 if current_price <= half_target:
                     _trailing_activated[symbol] = True
                     cancel_sl(symbol)
-                    # Place SL at breakeven plus 0.1% buffer to avoid immediate trigger
-                    be_price = avg_price * 1.001
+                    be_price = avg_price * 1.001   # 0.1% buffer
                     if DRY_RUN:
-                        log.info(f"[DRY RUN] {symbol}: trailing stop — SL moved to ₹{be_price:.2f} (breakeven ₹{avg_price:.2f} +0.1%)")
+                        log.info(f"[DRY RUN] {symbol}: breakeven SL — ₹{be_price:.2f} (entry ₹{avg_price:.2f} +0.1%)")
                     else:
                         new_sl = client.place_sl_order(symbol, token, "BUY", abs_qty, be_price)
                         if new_sl:
                             _sl_orders[symbol] = new_sl
-                        log.info(f"{symbol}: trailing stop — SL moved to ₹{be_price:.2f} (breakeven ₹{avg_price:.2f} +0.1%)")
+                        log.info(f"{symbol}: breakeven SL — ₹{be_price:.2f} (entry ₹{avg_price:.2f} +0.1%)")
 
-        trailing_label = " [trailing]" if _trailing_activated.get(symbol) else ""
+        trailing_label = " [BE-SL]" if _trailing_activated.get(symbol) else ""
+        sar_label = f" | SAR: ₹{sar_level:.2f} [af={_sar_state.get(symbol, {}).get('af', 0):.2f}]" if sar_level else ""
         direction_label = "LONG" if is_long else "SHORT"
         pnl_inr = pnl_pct / 100 * avg_price * abs_qty
         log.info(
@@ -528,6 +654,7 @@ def process_symbol(
             f" | P&L: {pnl_pct:+.2f}% (₹{pnl_inr:+.0f})"
             f" | Stop: ₹{long_stop if is_long else short_stop:.2f}{trailing_label}"
             f" | Target: ₹{long_target if is_long else short_target:.2f}"
+            f"{sar_label}"
         )
         return False
 
@@ -617,9 +744,11 @@ def process_symbol(
         order_id = client.place_market_order(symbol, token, "BUY", entry_qty)
         if order_id:
             _entry_data[symbol] = {"price": current_price, "qty": entry_qty, "direction": "long"}
+            _sar_init(symbol, long_stop, current_price)
             log.info(
                 f"LONG BREAKOUT [{entry_type}] {entry_qty} {symbol}"
                 f" | ₹{current_price:.2f} | Stop: ₹{long_stop:.2f} | Target: ₹{long_target:.2f}"
+                f" | SAR init: ₹{long_stop:.2f}"
             )
             sl_id = client.place_sl_order(symbol, token, "SELL", entry_qty, long_stop)
             if sl_id:
@@ -682,9 +811,11 @@ def process_symbol(
         order_id = client.place_market_order(symbol, token, "SELL", entry_qty)
         if order_id:
             _entry_data[symbol] = {"price": current_price, "qty": entry_qty, "direction": "short"}
+            _sar_init(symbol, short_stop, current_price)
             log.info(
                 f"SHORT BREAKOUT [{entry_type}] {entry_qty} {symbol}"
                 f" | ₹{current_price:.2f} | Stop: ₹{short_stop:.2f} | Target: ₹{short_target:.2f}"
+                f" | SAR init: ₹{short_stop:.2f}"
             )
             sl_id = client.place_sl_order(symbol, token, "BUY", entry_qty, short_stop)
             if sl_id:
@@ -841,24 +972,34 @@ def run_india_orb() -> None:
                     # Mark as skip so we don't retry each cycle
                     _or_cache[sym] = {"or_high": 0, "or_low": 0, "avg_or_volume": 0, "skip": True}
                 else:
-                    _or_cache[sym] = {"or_high": or_high, "or_low": or_low, "avg_or_volume": avg_or_vol}
-                    _update_vwap_from_bars(sym, bars)
-                    _update_ema_from_bars(sym, bars)
-                    # ATR(14) on today's bars — used for context/logging; stored in cache
-                    if _TA_AVAILABLE and _ta is not None and len(bars) >= 14:
-                        try:
-                            atr_val = float(
-                                _ta.volatility.AverageTrueRange(
-                                    high=bars["high"], low=bars["low"],
-                                    close=bars["close"], window=14,
-                                ).average_true_range().iloc[-1]
-                            )
-                            _or_cache[sym]["atr"] = atr_val
-                            log.info(f"  {sym}: OR ₹{or_low:.2f}–₹{or_high:.2f} ({or_pct:.2%}) | ATR ₹{atr_val:.2f}")
-                        except Exception:
-                            log.info(f"  {sym}: OR ₹{or_low:.2f}–₹{or_high:.2f} ({or_pct:.2%})")
+                    # Dual Thrust gate: skip if today's OR is wider than expected (gap/news day)
+                    dt_range = _compute_dual_thrust_india(sym)
+                    if dt_range is not None and or_range > INDIA_DUAL_THRUST_MAX_MULTIPLE * dt_range:
+                        log.info(
+                            f"  {sym}: OR ₹{or_range:.2f} > {INDIA_DUAL_THRUST_MAX_MULTIPLE}× "
+                            f"DT ₹{dt_range:.2f} — gap day, skipping"
+                        )
+                        _or_cache[sym] = {"or_high": 0, "or_low": 0, "avg_or_volume": 0, "skip": True}
                     else:
-                        log.info(f"  {sym}: OR ₹{or_low:.2f}–₹{or_high:.2f} ({or_pct:.2%})")
+                        _or_cache[sym] = {"or_high": or_high, "or_low": or_low, "avg_or_volume": avg_or_vol}
+                        _update_vwap_from_bars(sym, bars)
+                        _update_ema_from_bars(sym, bars)
+                        # ATR(14) on today's bars — used for context/logging; stored in cache
+                        if _TA_AVAILABLE and _ta is not None and len(bars) >= 14:
+                            try:
+                                atr_val = float(
+                                    _ta.volatility.AverageTrueRange(
+                                        high=bars["high"], low=bars["low"],
+                                        close=bars["close"], window=14,
+                                    ).average_true_range().iloc[-1]
+                                )
+                                _or_cache[sym]["atr"] = atr_val
+                                dt_label = f" | DT ₹{dt_range:.2f}" if dt_range else ""
+                                log.info(f"  {sym}: OR ₹{or_low:.2f}–₹{or_high:.2f} ({or_pct:.2%}) | ATR ₹{atr_val:.2f}{dt_label}")
+                            except Exception:
+                                log.info(f"  {sym}: OR ₹{or_low:.2f}–₹{or_high:.2f} ({or_pct:.2%})")
+                        else:
+                            log.info(f"  {sym}: OR ₹{or_low:.2f}–₹{or_high:.2f} ({or_pct:.2%})")
 
     # --- Manage held positions (use batch LTP — no getCandleData needed) ----------
     for sym, tok in held_symbols.items():

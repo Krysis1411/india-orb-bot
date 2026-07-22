@@ -59,6 +59,12 @@ ORB_PROFIT_MULTIPLIERS: dict[str, float] = {
 # Minimum OR range as fraction of stock price — skip narrow/indecisive opens
 ORB_MIN_OR_PCT = 0.005  # 0.5%
 
+# Dual Thrust OR-range gate: skip if today's OR range > N × expected range.
+# Expected range = max(HH - LC, HC - LL) over ORB_DUAL_THRUST_DAYS prior sessions.
+# Catches gap days / pre-market spike days where the OR is already exhausted.
+ORB_DUAL_THRUST_DAYS = 5           # prior trading days for range computation
+ORB_DUAL_THRUST_MAX_MULTIPLE = 2.0 # reject if OR range > 2× DT expected range
+
 # Breakout bar volume must be >= (avg OR bar volume × this factor)
 # Lowered from 1.2 → 1.0: 1.2 blocked all NVDA signals in backtest
 ORB_VOLUME_FACTOR = 1.0
@@ -177,6 +183,16 @@ INDIA_ORB_PROFIT_MULTIPLIER = 2.5    # target = OR range × 2.5 beyond breakout 
 INDIA_ORB_VOLUME_FACTOR     = 0.5    # breakout volume must be ≥ 0.5× avg OR bar volume [grid-search optimised]
 INDIA_ORB_STOP_BUFFER_PCT        = 0.005  # stop = 0.5% beyond OR boundary  [grid-search: PF 1.96 vs 1.55 at 1.0%]
 INDIA_ORB_BREAKOUT_STRENGTH_PCT = 0.0    # min % price must clear OR boundary — 0% wins (walk-forward)
+
+# Dual Thrust OR-range gate (India) — same formula as US bot, applied to .NS yfinance data
+INDIA_DUAL_THRUST_DAYS = 5
+INDIA_DUAL_THRUST_MAX_MULTIPLE = 2.0
+
+# Parabolic SAR trailing stop (India ORB only)
+# Wilder defaults: step=0.02, max=0.20 → SAR accelerates from 2% → 20% per new extreme.
+# Replaces the binary "move-to-breakeven at 0.5×target" with a smooth dynamic trail.
+INDIA_SAR_AF_STEP = 0.02   # acceleration factor step per new extreme
+INDIA_SAR_AF_MAX  = 0.20   # maximum acceleration factor
 
 # Directional bias — trade both breakout above AND breakout below (short selling intraday)
 INDIA_ALLOW_SHORTS = True
