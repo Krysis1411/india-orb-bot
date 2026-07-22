@@ -15,7 +15,7 @@ echo "==> Pulling latest code..."
 git -C "$REPO_DIR" pull origin main
 
 echo "==> Installing/updating Python dependencies..."
-"$REPO_DIR/venv/bin/pip" install -r "$REPO_DIR/requirements.txt" -q
+"$REPO_DIR/venv/bin/pip" install -r "$REPO_DIR/requirements.txt" -r "$REPO_DIR/requirements-india.txt" -q
 
 echo "==> Reloading systemd and restarting service..."
 sudo systemctl daemon-reload

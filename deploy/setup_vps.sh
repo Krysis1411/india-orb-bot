@@ -28,7 +28,7 @@ sudo apt-get install -y python3 python3-venv python3-pip ufw
 echo "==> Creating virtualenv in $REPO_DIR/venv"
 python3 -m venv "$REPO_DIR/venv"
 "$REPO_DIR/venv/bin/pip" install --upgrade pip
-"$REPO_DIR/venv/bin/pip" install -r "$REPO_DIR/requirements.txt"
+"$REPO_DIR/venv/bin/pip" install -r "$REPO_DIR/requirements.txt" -r "$REPO_DIR/requirements-india.txt"
 
 echo "==> Locking down firewall (SSH only — bot makes outbound calls only)"
 sudo ufw allow OpenSSH
