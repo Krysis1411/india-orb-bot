@@ -97,6 +97,15 @@ _or_cache: dict[str, dict] = {}
 # Session-start equity — set once at startup for daily P&L tracking.
 _session_start_equity = 0.0
 
+# Our own entry records: symbol → {price, qty, direction}
+# Stored when we place the entry order; popped when the position closes.
+# Needed because AngelOne's `averageprice` field in positions often returns 0.
+_entry_data = {}
+
+# Accumulated realized P&L for the session (₹).
+# Updated whenever a position closes (take profit, stop loss, EOD, or exchange SL detected).
+_realized_pnl = 0.0
+
 # Populated once at startup by the pre-market screener.
 # Maps symbol → SmartAPI token for today's watchlist.
 # Fixed for the whole session — screener does not re-run mid-day.
@@ -265,6 +274,7 @@ def process_symbol(
     ltp: float | None = None,
     or_data: dict | None = None,
 ) -> bool:
+    global _realized_pnl
     """
     Evaluate one NSE stock for ORB entry / position management.
     Returns True if a new entry order was placed.
@@ -349,18 +359,57 @@ def process_symbol(
             abs_qty = abs(qty)
             if abs_qty > 0:
                 cancel_sl(symbol)  # must cancel SL before placing exit order
+                # Record estimated realized P&L using current price as exit
+                data = _entry_data.pop(symbol, {})
+                entry_px_rec = data.get("price", current_price)
+                qty_rec = data.get("qty", abs_qty)
+                if is_long:
+                    eod_realized = (current_price - entry_px_rec) * qty_rec
+                else:
+                    eod_realized = (entry_px_rec - current_price) * qty_rec
+                _realized_pnl += eod_realized
+                eod_pct = eod_realized / (entry_px_rec * qty_rec) * 100 if entry_px_rec > 0 else 0.0
                 if DRY_RUN:
-                    log.info(f"[DRY RUN] EOD CLOSE — {close_side} {abs_qty} {symbol} at ~₹{current_price:.2f}")
+                    log.info(
+                        f"[DRY RUN] EOD CLOSE — {close_side} {abs_qty} {symbol}"
+                        f" | Est. P&L: ₹{eod_realized:+.0f} ({eod_pct:+.2f}%)"
+                    )
                 else:
                     client.place_market_order(symbol, token, close_side, abs_qty)
-                    log.info(f"EOD CLOSE — {close_side} {abs_qty} {symbol} at ~₹{current_price:.2f}")
+                    log.info(
+                        f"EOD CLOSE — {close_side} {abs_qty} {symbol} at ~₹{current_price:.2f}"
+                        f" | P&L: ₹{eod_realized:+.0f} ({eod_pct:+.2f}%)"
+                    )
         return False
 
     # --- Manage existing position ---
     pos = client.get_position(symbol, positions)
+
+    # Detect positions that were closed externally (exchange SL fired, or broker EOD sweep).
+    # If we have a recorded entry but the position is now flat, estimate and log realized P&L.
+    if symbol in _entry_data and (pos is None or int(pos.get("netqty", 0)) == 0):
+        data = _entry_data.pop(symbol)
+        entry_px = data["price"]
+        entry_qty_stored = data["qty"]
+        direction = data["direction"]
+        if direction == "long":
+            realized = (current_price - entry_px) * entry_qty_stored
+        else:
+            realized = (entry_px - current_price) * entry_qty_stored
+        _realized_pnl += realized
+        pct = realized / (entry_px * entry_qty_stored) * 100 if entry_px > 0 else 0.0
+        log.info(
+            f"{symbol}: position closed externally (exchange SL or broker)"
+            f" | P&L est. ₹{realized:+.0f} ({pct:+.2f}%)"
+            f" | Entry ₹{entry_px:.2f} → ₹{current_price:.2f}"
+        )
+
     if pos:
-        qty       = int(pos["netqty"])
-        avg_price = float(pos.get("averageprice", current_price))
+        qty = int(pos["netqty"])
+        # Use our own recorded entry price; AngelOne's averageprice field often returns 0.
+        stored = _entry_data.get(symbol, {})
+        reported_avg = float(pos.get("averageprice") or 0)
+        avg_price = stored.get("price") or (reported_avg if reported_avg > 0 else current_price)
         is_long   = qty > 0
         abs_qty   = abs(qty)
 
@@ -381,6 +430,17 @@ def process_symbol(
             # For STOP LOSS:   the SL order already fired at exchange; just clean up
             cancel_sl(symbol)
             _trailing_activated.pop(symbol, None)
+
+            # Record realized P&L: use actual exit price (current for TP; SL trigger for SL)
+            exit_px = current_price if hit_target else (long_stop if is_long else short_stop)
+            data = _entry_data.pop(symbol, {})
+            entry_px_rec = data.get("price", avg_price)
+            qty_rec = data.get("qty", abs_qty)
+            if is_long:
+                _realized_pnl += (exit_px - entry_px_rec) * qty_rec
+            else:
+                _realized_pnl += (entry_px_rec - exit_px) * qty_rec
+
             if DRY_RUN:
                 log.info(f"[DRY RUN] {reason} — {close_side} {abs_qty} {symbol} at ~₹{current_price:.2f} | P&L: {pnl_pct:+.2f}%")
             elif hit_target:
@@ -397,33 +457,37 @@ def process_symbol(
                 if current_price >= half_target:
                     _trailing_activated[symbol] = True
                     cancel_sl(symbol)  # cancel original stop
-                    be_price = avg_price
+                    # Place SL at breakeven minus 0.1% buffer to avoid immediate trigger
+                    be_price = avg_price * 0.999
                     if DRY_RUN:
-                        log.info(f"[DRY RUN] {symbol}: trailing stop — SL moved to breakeven ₹{be_price:.2f}")
+                        log.info(f"[DRY RUN] {symbol}: trailing stop — SL moved to ₹{be_price:.2f} (breakeven ₹{avg_price:.2f} −0.1%)")
                     else:
                         new_sl = client.place_sl_order(symbol, token, "SELL", abs_qty, be_price)
                         if new_sl:
                             _sl_orders[symbol] = new_sl
-                        log.info(f"{symbol}: trailing stop — SL moved to breakeven ₹{be_price:.2f}")
+                        log.info(f"{symbol}: trailing stop — SL moved to ₹{be_price:.2f} (breakeven ₹{avg_price:.2f} −0.1%)")
             else:  # short
                 half_target = or_low - or_range * INDIA_ORB_PROFIT_MULTIPLIER * 0.5
                 if current_price <= half_target:
                     _trailing_activated[symbol] = True
                     cancel_sl(symbol)
-                    be_price = avg_price
+                    # Place SL at breakeven plus 0.1% buffer to avoid immediate trigger
+                    be_price = avg_price * 1.001
                     if DRY_RUN:
-                        log.info(f"[DRY RUN] {symbol}: trailing stop — SL moved to breakeven ₹{be_price:.2f}")
+                        log.info(f"[DRY RUN] {symbol}: trailing stop — SL moved to ₹{be_price:.2f} (breakeven ₹{avg_price:.2f} +0.1%)")
                     else:
                         new_sl = client.place_sl_order(symbol, token, "BUY", abs_qty, be_price)
                         if new_sl:
                             _sl_orders[symbol] = new_sl
-                        log.info(f"{symbol}: trailing stop — SL moved to breakeven ₹{be_price:.2f}")
+                        log.info(f"{symbol}: trailing stop — SL moved to ₹{be_price:.2f} (breakeven ₹{avg_price:.2f} +0.1%)")
 
         trailing_label = " [trailing]" if _trailing_activated.get(symbol) else ""
         direction_label = "LONG" if is_long else "SHORT"
+        pnl_inr = pnl_pct / 100 * avg_price * abs_qty
         log.info(
-            f"{symbol} | {direction_label} {abs_qty} @ ₹{avg_price:.2f}"
-            f" | P&L: {pnl_pct:+.2f}%"
+            f"{symbol} | {direction_label} {abs_qty}"
+            f" | Entry ₹{avg_price:.2f} → ₹{current_price:.2f}"
+            f" | P&L: {pnl_pct:+.2f}% (₹{pnl_inr:+.0f})"
             f" | Stop: ₹{long_stop if is_long else short_stop:.2f}{trailing_label}"
             f" | Target: ₹{long_target if is_long else short_target:.2f}"
         )
@@ -514,6 +578,7 @@ def process_symbol(
             return True
         order_id = client.place_market_order(symbol, token, "BUY", entry_qty)
         if order_id:
+            _entry_data[symbol] = {"price": current_price, "qty": entry_qty, "direction": "long"}
             log.info(
                 f"LONG BREAKOUT [{entry_type}] {entry_qty} {symbol}"
                 f" | ₹{current_price:.2f} | Stop: ₹{long_stop:.2f} | Target: ₹{long_target:.2f}"
@@ -578,6 +643,7 @@ def process_symbol(
             return True
         order_id = client.place_market_order(symbol, token, "SELL", entry_qty)
         if order_id:
+            _entry_data[symbol] = {"price": current_price, "qty": entry_qty, "direction": "short"}
             log.info(
                 f"SHORT BREAKOUT [{entry_type}] {entry_qty} {symbol}"
                 f" | ₹{current_price:.2f} | Stop: ₹{short_stop:.2f} | Target: ₹{short_target:.2f}"
@@ -598,28 +664,11 @@ def process_symbol(
 # ---------------------------------------------------------------------------
 
 def run_india_orb() -> None:
+    global _realized_pnl
     now = now_ist()
     log.info(f"--- India ORB check at {now.strftime('%H:%M')} IST ---")
 
-    # --- Daily P&L circuit-breaker ---
     _block_new_entries = False
-    try:
-        funds = client.get_available_funds_inr()
-        if funds <= 0:
-            log.warning("Zero available funds — blocking new entries")
-            _block_new_entries = True
-        elif _session_start_equity > 0:
-            daily_loss = _session_start_equity - funds
-            daily_loss_pct = daily_loss / _session_start_equity
-            if daily_loss_pct > INDIA_DAILY_LOSS_LIMIT_PCT:
-                log.warning(
-                    f"Daily loss limit hit — down ₹{daily_loss:,.0f}"
-                    f" ({daily_loss_pct:.1%} > {INDIA_DAILY_LOSS_LIMIT_PCT:.0%})"
-                    f" — blocking new entries for rest of session"
-                )
-                _block_new_entries = True
-    except Exception:
-        pass
 
     # --- EOD sweep: close everything if past close time ---
     if now.time() >= CLOSE_TIME_IST:
@@ -693,6 +742,44 @@ def run_india_orb() -> None:
             log.warning("Batch quote failed — will fall back to getCandleData per symbol")
         else:
             log.info("WebSocket warming up — used REST batch quote this cycle")
+
+    # --- Daily P&L circuit-breaker (position-aware) ---
+    # Uses our own _entry_data records + realized P&L — not available_funds.
+    # available_funds drops by margin blocked when positions open, which caused
+    # false loss-limit triggers every session. This approach tracks actual P&L.
+    if _session_start_equity > 0:
+        unrealized = 0.0
+        for pos in open_positions:
+            sym = pos.get("tradingsymbol", "").replace("-EQ", "")
+            qty = int(pos.get("netqty", 0))
+            if qty == 0 or sym not in _entry_data:
+                continue
+            entry_px = _entry_data[sym]["price"]
+            ltp = batch_prices.get(sym, {}).get("ltp") or 0.0
+            if ltp > 0:
+                if qty > 0:
+                    unrealized += (ltp - entry_px) * qty
+                else:
+                    unrealized += (entry_px - ltp) * abs(qty)
+
+        total_pnl = _realized_pnl + unrealized
+        daily_loss = -total_pnl
+        daily_loss_pct = daily_loss / _session_start_equity
+
+        if open_positions or _realized_pnl != 0.0:
+            log.info(
+                f"Session P&L: ₹{total_pnl:+,.0f} ({total_pnl / _session_start_equity:+.1%})"
+                + (f" | Realized ₹{_realized_pnl:+,.0f} | Unrealized ₹{unrealized:+,.0f}"
+                   if open_positions else "")
+            )
+
+        if daily_loss_pct > INDIA_DAILY_LOSS_LIMIT_PCT:
+            log.warning(
+                f"Daily loss limit hit — down ₹{daily_loss:,.0f}"
+                f" ({daily_loss_pct:.1%} > {INDIA_DAILY_LOSS_LIMIT_PCT:.0%})"
+                f" — blocking new entries for rest of session"
+            )
+            _block_new_entries = True
 
     # --- OR cache: compute opening range for uncached symbols (once after 09:45) ---
     past_orb_window = now.time() >= ORB_READY_IST
