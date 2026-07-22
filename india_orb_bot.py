@@ -57,6 +57,14 @@ from config import (
     INDIA_SKIP_MONDAY_ENTRIES,
 )
 from india_screener import get_active_nse_symbols
+import india_performance as perf
+
+try:
+    import ta as _ta
+    _TA_AVAILABLE = True
+except ImportError:
+    _ta = None
+    _TA_AVAILABLE = False
 
 load_dotenv()
 
@@ -105,6 +113,11 @@ _entry_data = {}
 # Accumulated realized P&L for the session (₹).
 # Updated whenever a position closes (take profit, stop loss, EOD, or exchange SL detected).
 _realized_pnl = 0.0
+
+# Session trade counters — incremented each time a position closes.
+_session_trades = 0
+_session_wins = 0
+_session_losses = 0
 
 # Populated once at startup by the pre-market screener.
 # Maps symbol → SmartAPI token for today's watchlist.
@@ -229,6 +242,18 @@ def now_ist() -> datetime:
     return datetime.now(IST)
 
 
+def _is_nse_holiday() -> bool:
+    """Return True if today is an NSE CM-segment (equity market) holiday."""
+    try:
+        from jugaad_data.nse import NSELive
+        today_str = now_ist().strftime("%d-%b-%Y")
+        holidays = NSELive().holiday_list()
+        return any(h.get("tradingDate") == today_str for h in holidays.get("CM", []))
+    except Exception as e:
+        log.warning(f"NSE holiday check failed: {e} — assuming normal trading day")
+        return False
+
+
 def is_market_open() -> bool:
     t = now_ist().time()
     weekday = now_ist().weekday()  # 0=Mon … 4=Fri, 5=Sat, 6=Sun
@@ -274,7 +299,7 @@ def process_symbol(
     ltp: float | None = None,
     or_data: dict | None = None,
 ) -> bool:
-    global _realized_pnl
+    global _realized_pnl, _session_trades, _session_wins, _session_losses
     """
     Evaluate one NSE stock for ORB entry / position management.
     Returns True if a new entry order was placed.
@@ -368,6 +393,11 @@ def process_symbol(
                 else:
                     eod_realized = (entry_px_rec - current_price) * qty_rec
                 _realized_pnl += eod_realized
+                _session_trades += 1
+                if eod_realized > 0:
+                    _session_wins += 1
+                else:
+                    _session_losses += 1
                 eod_pct = eod_realized / (entry_px_rec * qty_rec) * 100 if entry_px_rec > 0 else 0.0
                 if DRY_RUN:
                     log.info(
@@ -397,6 +427,11 @@ def process_symbol(
         else:
             realized = (entry_px - current_price) * entry_qty_stored
         _realized_pnl += realized
+        _session_trades += 1
+        if realized > 0:
+            _session_wins += 1
+        else:
+            _session_losses += 1
         pct = realized / (entry_px * entry_qty_stored) * 100 if entry_px > 0 else 0.0
         log.info(
             f"{symbol}: position closed externally (exchange SL or broker)"
@@ -436,10 +471,13 @@ def process_symbol(
             data = _entry_data.pop(symbol, {})
             entry_px_rec = data.get("price", avg_price)
             qty_rec = data.get("qty", abs_qty)
-            if is_long:
-                _realized_pnl += (exit_px - entry_px_rec) * qty_rec
+            trade_pnl = (exit_px - entry_px_rec) * qty_rec if is_long else (entry_px_rec - exit_px) * qty_rec
+            _realized_pnl += trade_pnl
+            _session_trades += 1
+            if trade_pnl > 0:
+                _session_wins += 1
             else:
-                _realized_pnl += (entry_px_rec - exit_px) * qty_rec
+                _session_losses += 1
 
             if DRY_RUN:
                 log.info(f"[DRY RUN] {reason} — {close_side} {abs_qty} {symbol} at ~₹{current_price:.2f} | P&L: {pnl_pct:+.2f}%")
@@ -806,7 +844,21 @@ def run_india_orb() -> None:
                     _or_cache[sym] = {"or_high": or_high, "or_low": or_low, "avg_or_volume": avg_or_vol}
                     _update_vwap_from_bars(sym, bars)
                     _update_ema_from_bars(sym, bars)
-                    log.info(f"  {sym}: OR ₹{or_low:.2f}–₹{or_high:.2f} ({or_pct:.2%})")
+                    # ATR(14) on today's bars — used for context/logging; stored in cache
+                    if _TA_AVAILABLE and _ta is not None and len(bars) >= 14:
+                        try:
+                            atr_val = float(
+                                _ta.volatility.AverageTrueRange(
+                                    high=bars["high"], low=bars["low"],
+                                    close=bars["close"], window=14,
+                                ).average_true_range().iloc[-1]
+                            )
+                            _or_cache[sym]["atr"] = atr_val
+                            log.info(f"  {sym}: OR ₹{or_low:.2f}–₹{or_high:.2f} ({or_pct:.2%}) | ATR ₹{atr_val:.2f}")
+                        except Exception:
+                            log.info(f"  {sym}: OR ₹{or_low:.2f}–₹{or_high:.2f} ({or_pct:.2%})")
+                    else:
+                        log.info(f"  {sym}: OR ₹{or_low:.2f}–₹{or_high:.2f} ({or_pct:.2%})")
 
     # --- Manage held positions (use batch LTP — no getCandleData needed) ----------
     for sym, tok in held_symbols.items():
@@ -895,6 +947,12 @@ if __name__ == "__main__":
     if not client.connect():
         log.error("AngelOne authentication failed — check credentials in .env")
         raise SystemExit(1)
+
+    # NSE holiday check — exit early on market holidays
+    if _is_nse_holiday():
+        today_label = now_ist().strftime("%A %d-%b-%Y")
+        log.warning(f"NSE holiday today ({today_label}) — market is closed. Exiting.")
+        raise SystemExit(0)
 
     # Snapshot starting equity for daily P&L circuit-breaker
     _session_start_equity = client.get_available_funds_inr()
@@ -985,6 +1043,16 @@ if __name__ == "__main__":
                 log.info(f"Past 15:30 IST — session complete, exiting")
                 if _ws:
                     _ws.stop()
+                from datetime import date as _date_cls
+                perf.print_summary(
+                    _realized_pnl, _session_start_equity,
+                    _session_trades, _session_wins, _session_losses,
+                )
+                perf.log_session(
+                    _date_cls.today(), _realized_pnl, _session_start_equity,
+                    _session_trades, _session_wins, _session_losses,
+                )
+                perf.generate_report()
                 break
 
             run_india_orb()
