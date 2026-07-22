@@ -98,7 +98,8 @@ IC_MAX_DTE          = 1     # Only enter ICs expiring today or tomorrow (0–1 D
                             # Multi-day condors breach almost always — 4-day holds = 2× daily sigma exposure
 MIN_UNDERLYING_PRICE = 10.0 # Skip options on true penny stocks; liquid names (SOFI, AAL, F) trade fine at $10–20
 IC_MIN_CREDIT_RATIO = 0.15  # Credit must be ≥ 15% of spread width; loosened from 0.20 to allow more setups
-IC_SIGMA_MULTIPLE   = 1.5   # Short strikes must be ≥ 1.5× expected move away from current price
+IC_SIGMA_MULTIPLE   = 1.5   # Short strikes fallback: ≥ 1.5× expected move away from current price
+IC_SHORT_DELTA      = 0.15  # Preferred: short strikes where abs(delta) ≤ 0.15 (~85% OTM probability)
 IC_PROFIT_TARGET_PCT = 0.50 # Close IC when unrealised P&L reaches 50% of credit received
 IC_PNL_STOP_MULTIPLE = 2.0  # P&L stop: close if total loss > 2× credit received
 
