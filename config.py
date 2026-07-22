@@ -65,6 +65,11 @@ ORB_MIN_OR_PCT = 0.005  # 0.5%
 ORB_DUAL_THRUST_DAYS = 5           # prior trading days for range computation
 ORB_DUAL_THRUST_MAX_MULTIPLE = 2.0 # reject if OR range > 2× DT expected range
 
+# ATR-percentile volatility regime gate (from aaryansinha16/AI-trader regime_detector.py)
+# If SPY's 14-day ATR is above this percentile of its 1-year history → HIGH_VOLATILITY.
+# ORB entries are suppressed on chaotic opens (breakouts fail more, OR breached both ways).
+ORB_ATR_REGIME_HIGH_PCT = 75       # 75th percentile → HIGH regime → suppress new entries
+
 # Breakout bar volume must be >= (avg OR bar volume × this factor)
 # Lowered from 1.2 → 1.0: 1.2 blocked all NVDA signals in backtest
 ORB_VOLUME_FACTOR = 1.0
@@ -108,6 +113,7 @@ IC_SIGMA_MULTIPLE   = 1.5   # Short strikes fallback: ≥ 1.5× expected move aw
 IC_SHORT_DELTA      = 0.15  # Preferred: short strikes where abs(delta) ≤ 0.15 (~85% OTM probability)
 IC_PROFIT_TARGET_PCT = 0.50 # Close IC when unrealised P&L reaches 50% of credit received
 IC_PNL_STOP_MULTIPLE = 2.0  # P&L stop: close if total loss > 2× credit received
+IC_MAX_PCR_ATM = 2.5        # Skip IC if put/call OI ratio near ATM > this (directional bias too strong for neutral condor)
 
 # ---------------------------------------------------------------------------
 # Entry quality filters (derived from backtest analysis)

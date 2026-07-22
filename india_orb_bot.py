@@ -765,6 +765,20 @@ def process_symbol(
             log.info(f"{symbol}: stale short breakout — already past target")
             return False
 
+        # ── Pullback-in-uptrend filter (AI-trader: indicators.py) ──────────────────
+        # Skip short when local EMA trend is still bullish (EMA9 > EMA21 with ≥9 bars).
+        # A breakdown below OR low while the 5-min EMA trend is up = retracement, not reversal.
+        _es = _ema_state.get(symbol, {})
+        if (_es.get("bars_seen", 0) >= 9
+                and _es.get("ema9") is not None
+                and _es.get("ema21") is not None
+                and _es["ema9"] > _es["ema21"]):
+            log.info(
+                f"{symbol}: pullback-in-uptrend — EMA9 ₹{_es['ema9']:.2f} > EMA21 ₹{_es['ema21']:.2f}"
+                " — skipping short (likely retracement)"
+            )
+            return False
+
         # ── Combined: record direction on first breakout bar, do NOT enter yet ──────
         vol_ratio = current_volume / avg_or_volume if avg_or_volume > 0 else 0.0
         if symbol not in _orb_direction:
