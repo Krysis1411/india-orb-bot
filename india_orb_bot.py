@@ -106,6 +106,20 @@ _ema_state: dict[str, dict] = {}
 # Avoids repeated getCandleData calls for OR data that never changes after 09:45.
 _or_cache: dict[str, dict] = {}
 
+# Consecutive OR-fetch failures per symbol (rate limits, transient API errors).
+# After _OR_FETCH_MAX_RETRIES cycles of failing to fetch a symbol's candles,
+# we give up on it for the rest of the session instead of retrying forever —
+# each retry is itself an API call that can trip the rate limit further.
+_or_fetch_fail_count: dict[str, int] = {}
+_OR_FETCH_MAX_RETRIES = 3
+
+# Symbols whose candle fetch failed earlier THIS cycle (reset every run_india_orb()
+# call). Prevents the entry-screening loop from immediately re-fetching a symbol
+# the OR-cache loop just failed to reach seconds earlier — that back-to-back
+# retry (no cached OR → process_symbol() does its own getCandleData call) is
+# what was compounding rate-limit errors into a spiral.
+_fetch_failed_this_cycle: set[str] = set()
+
 # Session-start equity — set once at startup for daily P&L tracking.
 _session_start_equity = 0.0
 
@@ -852,6 +866,7 @@ def run_india_orb() -> None:
     log.info(f"--- India ORB check at {now.strftime('%H:%M')} IST ---")
 
     _block_new_entries = False
+    _fetch_failed_this_cycle.clear()
 
     # --- EOD sweep: close everything if past close time ---
     if now.time() >= CLOSE_TIME_IST:
@@ -975,7 +990,18 @@ def run_india_orb() -> None:
                 tok = today_tokens[sym]
                 bars = client.get_today_candles(sym, tok)
                 if bars is None:
+                    _fetch_failed_this_cycle.add(sym)
+                    _or_fetch_fail_count[sym] = _or_fetch_fail_count.get(sym, 0) + 1
+                    if _or_fetch_fail_count[sym] >= _OR_FETCH_MAX_RETRIES:
+                        log.warning(
+                            f"  {sym}: candle fetch failed {_or_fetch_fail_count[sym]}× in a row"
+                            f" — giving up on OR for today (not retrying further)"
+                        )
+                        _or_cache[sym] = {"or_high": 0, "or_low": 0, "avg_or_volume": 0, "skip": True}
+                    else:
+                        _time.sleep(1.5)   # extra cooldown after a failure before the next symbol
                     continue
+                _or_fetch_fail_count.pop(sym, None)
                 or_result = compute_opening_range(bars)
                 if or_result is None:
                     continue
@@ -1042,6 +1068,9 @@ def run_india_orb() -> None:
         or_data = _or_cache.get(symbol)
         if or_data and or_data.get("skip"):
             continue  # OR was too narrow/wide — not tradeable today
+
+        if symbol in _fetch_failed_this_cycle:
+            continue  # candle fetch already failed for this symbol this cycle — don't retry immediately
 
         ltp = batch_prices.get(symbol, {}).get("ltp")
 
