@@ -1074,6 +1074,14 @@ def run_india_orb() -> None:
 
         ltp = batch_prices.get(symbol, {}).get("ltp")
 
+        if or_data and ltp is None:
+            # OR is already known, but no live price this cycle (WebSocket
+            # hasn't ticked this symbol yet / batch quote missed it) —
+            # skip rather than force process_symbol()'s fallback getCandleData
+            # call purely for price discovery. A fresh price will be
+            # available from the next cycle in ~5 minutes.
+            continue
+
         # Quick pre-filter using batch LTP — only call process_symbol for symbols
         # near a breakout or with no OR cached yet (avoids getCandleData for quiet symbols)
         if or_data and ltp is not None:
