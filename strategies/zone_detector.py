@@ -91,7 +91,7 @@ def find_zones(
     breakout_leg_bars: int = 3,          # breakout move can unfold over up to this many bars
     legin_bars: int = 8,                 # how many bars before the base define the leg-in direction
     legin_min_move_atr: float = 1.0,     # min move (in ATR) to call the leg-in a real trend, not noise
-    legin_min_volume_ratio: float = 1.0,  # leg-in avg volume >= this x recent avg volume (real rally, not drift)
+    legin_min_volume_ratio: float = 1.1,  # leg-in avg volume >= this x recent avg volume (real rally, not drift)
     volume_lookback: int = 20,
     breakout_min_volume_ratio: float = 1.5,  # breakout volume >= this x recent avg volume
 ) -> list[Zone]:
