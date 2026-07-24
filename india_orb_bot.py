@@ -120,6 +120,21 @@ _OR_FETCH_MAX_RETRIES = 3
 # what was compounding rate-limit errors into a spiral.
 _fetch_failed_this_cycle: set[str] = set()
 
+# --- Near-breakout cooldown (freqtrade-style "protection") ---------------------
+# Consecutive cycles a symbol has been sitting near/through its OR boundary
+# (price-only check, no API call — uses batch/WS LTP already in hand) without
+# actually entering. A symbol camped near breakout for a long stretch keeps
+# needing a volume-confirmation candle fetch every single cycle (see
+# process_symbol's on-demand fetch when current_volume is None) — that's the
+# one rate-limit source neither of the earlier fixes addressed. After
+# _NEAR_BREAKOUT_COOLDOWN_TRIGGER consecutive near-breakout cycles without an
+# entry, skip the symbol entirely (no process_symbol call, no candle fetch) for
+# _NEAR_BREAKOUT_COOLDOWN_CYCLES cycles before resuming evaluation.
+_near_breakout_streak: dict[str, int] = {}
+_cooldown_cycles_left: dict[str, int] = {}
+_NEAR_BREAKOUT_COOLDOWN_TRIGGER = 4    # ~20 min of hovering near breakout
+_NEAR_BREAKOUT_COOLDOWN_CYCLES = 3     # ~15 min skip before re-evaluating
+
 # Session-start equity — set once at startup for daily P&L tracking.
 _session_start_equity = 0.0
 
@@ -1072,6 +1087,11 @@ def run_india_orb() -> None:
         if symbol in _fetch_failed_this_cycle:
             continue  # candle fetch already failed for this symbol this cycle — don't retry immediately
 
+        if _cooldown_cycles_left.get(symbol, 0) > 0:
+            _cooldown_cycles_left[symbol] -= 1
+            log.debug(f"{symbol}: cooling down ({_cooldown_cycles_left[symbol]} cycles left) — skipping")
+            continue
+
         ltp = batch_prices.get(symbol, {}).get("ltp")
 
         if or_data and ltp is None:
@@ -1089,7 +1109,23 @@ def run_india_orb() -> None:
             near_short = ltp < or_data["or_low"] and INDIA_ALLOW_SHORTS
             if not near_long and not near_short:
                 log.debug(f"{symbol}: LTP ₹{ltp:.2f} inside OR ₹{or_data['or_low']:.2f}–{or_data['or_high']:.2f} — no signal")
+                _near_breakout_streak.pop(symbol, None)
                 continue  # price inside OR range — skip, no getCandleData needed
+
+            # Near-breakout cooldown trigger — a symbol camped near its OR
+            # boundary for many cycles without entering keeps needing a fresh
+            # volume-confirmation candle fetch every cycle. Cool it down
+            # instead of hammering it (and the rate limit) indefinitely.
+            streak = _near_breakout_streak.get(symbol, 0) + 1
+            if streak > _NEAR_BREAKOUT_COOLDOWN_TRIGGER:
+                log.info(
+                    f"{symbol}: near breakout for {streak} cycles without entering"
+                    f" — cooling down for {_NEAR_BREAKOUT_COOLDOWN_CYCLES} cycles"
+                )
+                _cooldown_cycles_left[symbol] = _NEAR_BREAKOUT_COOLDOWN_CYCLES
+                _near_breakout_streak[symbol] = 0
+                continue
+            _near_breakout_streak[symbol] = streak
 
         try:
             opened = process_symbol(symbol, token, nifty_up, open_count, max_positions,
@@ -1097,6 +1133,7 @@ def run_india_orb() -> None:
                                     ltp=ltp, or_data=or_data)
             if opened:
                 open_count += 1
+                _near_breakout_streak.pop(symbol, None)
         except Exception as e:
             log.error(f"{symbol}: unexpected error — {e}")
         _time.sleep(1.1)   # getCandleData only called here for breakout candidates
