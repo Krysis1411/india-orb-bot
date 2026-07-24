@@ -1,18 +1,28 @@
 """
-Supply/demand zone detection — classic "base + breakout leg" definition.
+Supply/demand zone detection — classic "base + breakout leg" definition,
+with reversal-vs-continuation classification.
 
 A zone is a short consolidation (the base) immediately followed by a sharp,
 high-volume move away from it (the breakout leg). The base's price range
-becomes the zone:
+becomes the zone. There are four patterns, named by what happens before and
+after the base:
 
-  Demand zone: base -> strong move UP away from it (buyers overwhelmed sellers)
-  Supply zone: base -> strong move DOWN away from it (sellers overwhelmed buyers)
+  Rally-Base-Rally (RBR): up into the base, up out of it   -> demand, CONTINUATION
+  Drop-Base-Rally  (DBR): down into the base, up out of it  -> demand, REVERSAL
+  Drop-Base-Drop   (DBD): down into the base, down out      -> supply, CONTINUATION
+  Rally-Base-Drop  (RBD): up into the base, down out of it  -> supply, REVERSAL
 
-Zone strength is NOT just the size of the move, and NOT just the volume --
-it's both together. A big move on average volume, or average-sized move on
-huge volume, is a weaker signal than a big move on high volume at the same
-time. strength = move_strength_in_atr * volume_ratio (multiplicative, so a
-zone needs both factors to score highly, not just one).
+Reversal zones (DBR/RBD) are the powerful ones — the trend actually changes
+direction there, which is a much stronger signal than a continuation zone
+just extending a move that was already happening. Reversal zones get a
+strength bonus.
+
+Zone strength is NOT just the size of the breakout move, and NOT just the
+volume -- it's both together. A big move on average volume, or an
+average-sized move on huge volume, is a weaker signal than a big move on
+high volume at the same time. base strength = move_strength_in_atr *
+volume_ratio (multiplicative, so a zone needs both factors to score highly,
+not just one) -- then reversal zones get an extra multiplier on top.
 """
 from __future__ import annotations
 
@@ -20,10 +30,13 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+REVERSAL_BONUS = 1.5   # strength multiplier for DBR/RBD zones vs RBR/DBD
+
 
 @dataclass
 class Zone:
     kind: str              # "demand" | "supply"
+    pattern: str            # "RBR" | "DBR" | "DBD" | "RBD"
     price_low: float
     price_high: float
     base_start: pd.Timestamp
@@ -31,13 +44,19 @@ class Zone:
     breakout_ts: pd.Timestamp
     breakout_move_atr: float     # breakout leg's move, in multiples of ATR
     breakout_volume_ratio: float  # breakout leg's volume / recent average volume
+    legin_move_atr: float = 0.0   # how many ATRs price moved INTO the base, signed
     timeframe: str = ""     # set by caller: "1d" | "1h"
     strength: float = field(init=False)
     touches: int = field(default=0, init=False)   # updated during backtest (freshness)
     broken: bool = field(default=False, init=False)  # price closed decisively through it
 
     def __post_init__(self) -> None:
-        self.strength = round(self.breakout_move_atr * self.breakout_volume_ratio, 2)
+        base = self.breakout_move_atr * self.breakout_volume_ratio
+        self.strength = round(base * REVERSAL_BONUS, 2) if self.is_reversal else round(base, 2)
+
+    @property
+    def is_reversal(self) -> bool:
+        return self.pattern in ("DBR", "RBD")
 
     @property
     def mid(self) -> float:
@@ -66,6 +85,8 @@ def find_zones(
     max_base_bars: int = 4,             # base is 1..N consecutive tight bars
     breakout_min_move_atr: float = 2.0,  # breakout leg must move >= this many ATRs away
     breakout_leg_bars: int = 3,          # breakout move can unfold over up to this many bars
+    legin_bars: int = 8,                 # how many bars before the base define the leg-in direction
+    legin_min_move_atr: float = 1.0,     # min move (in ATR) to call the leg-in a real trend, not noise
     volume_lookback: int = 20,
     breakout_min_volume_ratio: float = 1.5,  # breakout volume >= this x recent avg volume
 ) -> list[Zone]:
@@ -107,6 +128,18 @@ def find_zones(
         base_low = base_slice["low"].min()
         base_high = base_slice["high"].max()
 
+        # --- determine the leg-IN direction: what was happening before the base ---
+        # This is what separates a REVERSAL zone (trend flips here -- the powerful
+        # kind, per DBR/RBD below) from a CONTINUATION zone (just extends a move
+        # already in progress, RBR/DBD -- weaker). Compare price just before the
+        # base to price a few bars further back.
+        legin_start_idx = max(0, base_start - legin_bars)
+        price_before_legin = df["close"].iloc[legin_start_idx]
+        price_at_base = base_slice["close"].iloc[0]
+        legin_move_atr = (price_at_base - price_before_legin) / atr
+        legin_up = legin_move_atr >= legin_min_move_atr      # rallied into the base
+        legin_down = legin_move_atr <= -legin_min_move_atr    # dropped into the base
+
         # --- check the next few bars (the "leg") for a breakout away from the base ---
         # Real breakout legs often unfold over 2-3 bars, not a single bar -- so we
         # look at a short window and take the cumulative move + the strongest
@@ -130,6 +163,7 @@ def find_zones(
             if move_up >= breakout_min_move_atr and move_up >= move_down:
                 zone = Zone(
                     kind="demand",
+                    pattern="DBR" if legin_down else "RBR",
                     price_low=float(base_low),
                     price_high=float(base_high),
                     base_start=base_slice.index[0],
@@ -137,6 +171,7 @@ def find_zones(
                     breakout_ts=leg.index[0],
                     breakout_move_atr=round(float(move_up), 2),
                     breakout_volume_ratio=round(float(volume_ratio), 2),
+                    legin_move_atr=round(float(legin_move_atr), 2),
                     timeframe=timeframe,
                 )
                 zones.append(zone)
@@ -145,6 +180,7 @@ def find_zones(
             if move_down >= breakout_min_move_atr:
                 zone = Zone(
                     kind="supply",
+                    pattern="RBD" if legin_up else "DBD",
                     price_low=float(base_low),
                     price_high=float(base_high),
                     base_start=base_slice.index[0],
@@ -152,6 +188,7 @@ def find_zones(
                     breakout_ts=leg.index[0],
                     breakout_move_atr=round(float(move_down), 2),
                     breakout_volume_ratio=round(float(volume_ratio), 2),
+                    legin_move_atr=round(float(legin_move_atr), 2),
                     timeframe=timeframe,
                 )
                 zones.append(zone)
