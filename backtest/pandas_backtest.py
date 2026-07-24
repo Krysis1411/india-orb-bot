@@ -764,11 +764,221 @@ def run_optimize(symbols: list[str], nifty_up) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Walk-forward validation: 67/33 chronological train/test split
+# ---------------------------------------------------------------------------
+
+def _data_date_range(symbols: list[str]) -> tuple[pd.Timestamp, pd.Timestamp] | tuple[None, None]:
+    lo, hi = None, None
+    for sym in symbols:
+        path = DATA_DIR / f"{sym}_NSE_5m.parquet"
+        if not path.exists():
+            continue
+        df = load_nse_bars_df(path)
+        if df.empty:
+            continue
+        l, h = df.index.min(), df.index.max()
+        lo = l if lo is None else min(lo, l)
+        hi = h if hi is None else max(hi, h)
+    return lo, hi
+
+
+def _grid_search(symbols: list[str], nifty_up, date_from, date_to, use_vwap_ema: bool,
+                  stop_grid: list[float], target_grid: list[float]) -> dict | None:
+    """Best (stop, mult) on [date_from, date_to) by profit factor among combos with >=15 trades."""
+    best = None
+    for stop in stop_grid:
+        for mult in target_grid:
+            all_trades = []
+            for sym in symbols:
+                all_trades.extend(run_symbol(
+                    sym, nifty_up, date_from=date_from, date_to=date_to,
+                    use_vwap_ema=use_vwap_ema, stop_buffer_pct=stop, profit_multiplier=mult,
+                ))
+            if len(all_trades) < 15:
+                continue
+            stats = _full_stats(all_trades)
+            if best is None or stats["profit_factor"] > best["stats"]["profit_factor"]:
+                best = dict(stop=stop, mult=mult, stats=stats, n=len(all_trades))
+    return best
+
+
+def run_walkforward_fixed(symbols: list[str], train_pct: float = 0.67) -> None:
+    """
+    Same train/test split as run_walkforward, but *no* re-optimization --
+    runs the bot's actual live config (INDIA_ORB_STOP_BUFFER_PCT /
+    INDIA_ORB_PROFIT_MULTIPLIER) unchanged on both windows. Answers "how
+    would what's actually running today have done on unseen recent data?"
+    as opposed to "does a freshly best-fit config generalize?".
+    """
+    date_min, date_max = _data_date_range(symbols)
+    if date_min is None:
+        print("\n  Walk-forward (fixed config): no data found.")
+        return
+
+    total_days = (date_max - date_min).days
+    split_ts = date_min + pd.Timedelta(days=int(total_days * train_pct))
+    s0 = date_min.strftime("%Y-%m-%d")
+    s1 = split_ts.strftime("%Y-%m-%d")
+    s2 = (date_max + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+    print(f"\nWalk-Forward (fixed live config: stop={INDIA_ORB_STOP_BUFFER_PCT:.1%}"
+          f"  mult={INDIA_ORB_PROFIT_MULTIPLIER:.1f}x -- no re-optimization)")
+    print(f"  Data  : {s0} -> {date_max.strftime('%Y-%m-%d')}  ({total_days} days)")
+    print(f"  Train : {s0} -> {s1}  ({train_pct:.0%})")
+    print(f"  Test  : {s1} -> {s2}  ({1-train_pct:.0%})")
+    print(f"  Syms  : {len(symbols)}")
+
+    nifty_train = _load_nifty_trend(date_from=s0, date_to=s1)
+    nifty_test = _load_nifty_trend(date_from=s1, date_to=s2)
+
+    results = {}
+    for label, use_vwap_ema in [("VWAP/EMA ON  (current live logic)", True),
+                                 ("VWAP/EMA OFF (plain ORB + SAR)   ", False)]:
+        train_trades, test_trades = [], []
+        for sym in symbols:
+            train_trades.extend(run_symbol(sym, nifty_train, date_from=s0, date_to=s1,
+                                            use_vwap_ema=use_vwap_ema))
+            test_trades.extend(run_symbol(sym, nifty_test, date_from=s1, date_to=s2,
+                                           use_vwap_ema=use_vwap_ema))
+        train_stats = _full_stats(train_trades)
+        test_stats = _full_stats(test_trades)
+        results[label] = test_stats
+
+        print(f"\n  -- {label} --")
+        if not train_stats or not test_stats:
+            print(f"    train n={len(train_trades)}  test n={len(test_trades)} -- too few trades")
+            continue
+
+        print(f"\n    {'Metric':<22} {'In-sample':>14} {'Out-of-sample':>15}")
+        print(f"    {'-'*53}")
+        cmp_rows = [
+            ("Trades", "n", "d"), ("Win rate %", "win_rate", ".1f"),
+            ("Profit factor", "profit_factor", ".2f"), ("Expectancy Rs", "expectancy", "+.2f"),
+            ("Sharpe", "sharpe", ".2f"), ("Total P&L Rs", "total_pnl", "+,.0f"),
+            ("Max DD Rs", "max_dd", ",.0f"), ("Max consec loss", "max_consec_losses", "d"),
+        ]
+        for lbl, key, fmt in cmp_rows:
+            tv, ov = train_stats.get(key, 0), test_stats.get(key, 0)
+            print(f"    {lbl:<22} {format(tv, fmt):>14} {format(ov, fmt):>15}")
+
+        oos_pf, oos_pnl = test_stats.get("profit_factor", 0), test_stats.get("total_pnl", 0)
+        if oos_pf >= 1.2 and oos_pnl > 0:
+            verdict = "PASS -- holds up on unseen data"
+        elif oos_pnl > 0:
+            verdict = "CAUTION -- OOS profitable but weaker than IS"
+        else:
+            verdict = "FAIL -- loses money on unseen data"
+        print(f"\n    Verdict: {verdict}")
+
+    if len(results) == 2:
+        print(f"\n{'='*70}\n  HEAD-TO-HEAD (out-of-sample only, fixed live config)\n{'='*70}")
+        for label, s in results.items():
+            if not s:
+                print(f"  {label}: no OOS trades")
+                continue
+            print(f"  {label}  |  n={s['n']:>4}  win%={s['win_rate']:>5.1f}%  PF={s['profit_factor']:>5.2f}  "
+                  f"Rs{s['total_pnl']:>+8,.0f}  Sharpe={s['sharpe']:>5.2f}")
+
+
+def run_walkforward(symbols: list[str], train_pct: float = 0.67) -> None:
+    date_min, date_max = _data_date_range(symbols)
+    if date_min is None:
+        print("\n  Walk-forward: no data found.")
+        return
+
+    total_days = (date_max - date_min).days
+    split_ts = date_min + pd.Timedelta(days=int(total_days * train_pct))
+    s0 = date_min.strftime("%Y-%m-%d")
+    s1 = split_ts.strftime("%Y-%m-%d")
+    s2 = (date_max + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+    print(f"\nWalk-Forward Validation")
+    print(f"  Data  : {s0} -> {date_max.strftime('%Y-%m-%d')}  ({total_days} days)")
+    print(f"  Train : {s0} -> {s1}  ({train_pct:.0%})")
+    print(f"  Test  : {s1} -> {s2}  ({1-train_pct:.0%})")
+    print(f"  Syms  : {len(symbols)}")
+
+    stop_grid = [0.003, 0.005, 0.010]
+    target_grid = [1.5, 2.0, 2.5, 3.0]
+
+    nifty_train = _load_nifty_trend(date_from=s0, date_to=s1)
+    nifty_test = _load_nifty_trend(date_from=s1, date_to=s2)
+
+    results = {}
+    for label, use_vwap_ema in [("VWAP/EMA ON  (current live logic)", True),
+                                 ("VWAP/EMA OFF (plain ORB + SAR)   ", False)]:
+        print(f"\n  -- {label} --")
+        print(f"  Training phase ({len(stop_grid)}x{len(target_grid)} grid x {len(symbols)} syms)...")
+        best = _grid_search(symbols, nifty_train, s0, s1, use_vwap_ema, stop_grid, target_grid)
+        if best is None:
+            print("    No combination reached 15+ trades in training period.")
+            continue
+        print(f"    Best -> stop={best['stop']:.1%}  mult={best['mult']:.1f}x"
+              f"  (IS: n={best['n']}  PF={best['stats']['profit_factor']:.2f}"
+              f"  win%={best['stats']['win_rate']:.1f}%  pnl=Rs{best['stats']['total_pnl']:+,.0f})")
+
+        test_trades = []
+        for sym in symbols:
+            test_trades.extend(run_symbol(
+                sym, nifty_test, date_from=s1, date_to=s2,
+                use_vwap_ema=use_vwap_ema, stop_buffer_pct=best["stop"], profit_multiplier=best["mult"],
+            ))
+        test_stats = _full_stats(test_trades)
+        results[label] = dict(train=best["stats"], test=test_stats, stop=best["stop"], mult=best["mult"])
+
+        if not test_stats:
+            print("    OOS: no trades in test period.")
+            continue
+
+        print(f"\n    {'Metric':<22} {'In-sample':>14} {'Out-of-sample':>15}")
+        print(f"    {'-'*53}")
+        cmp_rows = [
+            ("Trades", "n", "d"), ("Win rate %", "win_rate", ".1f"),
+            ("Profit factor", "profit_factor", ".2f"), ("Expectancy Rs", "expectancy", "+.2f"),
+            ("Sharpe", "sharpe", ".2f"), ("Total P&L Rs", "total_pnl", "+,.0f"),
+            ("Max DD Rs", "max_dd", ",.0f"), ("Max consec loss", "max_consec_losses", "d"),
+        ]
+        for lbl, key, fmt in cmp_rows:
+            tv, ov = best["stats"].get(key, 0), test_stats.get(key, 0)
+            print(f"    {lbl:<22} {format(tv, fmt):>14} {format(ov, fmt):>15}")
+
+        oos_pf, oos_pnl = test_stats.get("profit_factor", 0), test_stats.get("total_pnl", 0)
+        if oos_pf >= 1.2 and oos_pnl > 0:
+            verdict = "PASS -- generalises well to unseen data"
+        elif oos_pnl > 0:
+            verdict = "CAUTION -- OOS profitable but weaker than IS (mild overfit)"
+        else:
+            verdict = "FAIL -- does NOT generalise (overfit to training data)"
+        print(f"\n    Verdict: {verdict}")
+
+    if len(results) == 2:
+        print(f"\n{'='*70}\n  HEAD-TO-HEAD (out-of-sample only)\n{'='*70}")
+        for label, r in results.items():
+            s = r["test"]
+            if not s:
+                print(f"  {label}: no OOS trades")
+                continue
+            print(f"  {label}  stop={r['stop']:.1%} mult={r['mult']:.1f}x  |  "
+                  f"n={s['n']:>4}  win%={s['win_rate']:>5.1f}%  PF={s['profit_factor']:>5.2f}  "
+                  f"Rs{s['total_pnl']:>+8,.0f}  Sharpe={s['sharpe']:>5.2f}")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     args = sys.argv[1:]
+
+    if "--walkforward-fixed" in args:
+        syms = [a for a in args if not a.startswith("--")] or INDIA_SYMBOLS
+        run_walkforward_fixed(syms)
+        sys.exit(0)
+
+    if "--walkforward" in args:
+        syms = [a for a in args if not a.startswith("--")] or INDIA_SYMBOLS
+        run_walkforward(syms)
+        sys.exit(0)
 
     print("Loading Nifty 50 bars for trend filter...", end="  ", flush=True)
     nifty = _load_nifty_trend()
