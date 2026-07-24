@@ -1,0 +1,169 @@
+"""
+Entry confirmation for supply/demand zone trades.
+
+Touching a zone isn't enough to enter (per the "reaction confirmation"
+design decision) -- price has to actually react there, and that reaction
+needs to be real, not a coin flip. Three independent checks, all required:
+
+  1. Reaction candle  -- a rejection pattern (pin bar / engulfing) at the
+                          zone, in the expected direction.
+  2. RSI exhaustion    -- momentum should be stretched the way that makes a
+                          reversal plausible (oversold at a demand zone,
+                          overbought at a supply zone), not neutral.
+  3. Reaction volume   -- the rejection candle itself needs above-average
+                          volume, confirming real buying/selling showed up,
+                          not just price drifting through on a quiet bar.
+
+This runs on the 5-min execution timeframe against zones found on daily/1h
+data (see zone_detector.py).
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pandas as pd
+
+from strategies.zone_detector import Zone
+
+
+@dataclass
+class ReactionSignal:
+    ts: pd.Timestamp
+    direction: str          # "long" | "short"
+    pattern: str             # "pin_bar" | "engulfing"
+    price: float             # confirmed entry reference price (the reaction bar's close)
+    rsi: float
+    volume_ratio: float
+
+
+# ---------------------------------------------------------------------------
+# RSI (Wilder's, standard 14-period)
+# ---------------------------------------------------------------------------
+
+def rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, float("nan"))
+    out = 100 - (100 / (1 + rs))
+    return out.fillna(100)  # avg_loss == 0 -> maximally overbought, RSI 100
+
+
+# ---------------------------------------------------------------------------
+# Candlestick reaction patterns
+# ---------------------------------------------------------------------------
+
+def is_bullish_pin_bar(o: float, h: float, l: float, c: float, wick_ratio: float = 2.0) -> bool:
+    """Small body, long lower wick (rejection of the downside), close in upper half."""
+    body = abs(c - o)
+    full_range = h - l
+    if full_range <= 0:
+        return False
+    lower_wick = min(o, c) - l
+    upper_wick = h - max(o, c)
+    return (
+        lower_wick >= wick_ratio * max(body, full_range * 0.01)
+        and lower_wick > upper_wick
+        and c >= l + full_range * 0.5   # close in upper half of the bar
+    )
+
+
+def is_bearish_pin_bar(o: float, h: float, l: float, c: float, wick_ratio: float = 2.0) -> bool:
+    """Small body, long upper wick (rejection of the upside), close in lower half."""
+    body = abs(c - o)
+    full_range = h - l
+    if full_range <= 0:
+        return False
+    upper_wick = h - max(o, c)
+    lower_wick = min(o, c) - l
+    return (
+        upper_wick >= wick_ratio * max(body, full_range * 0.01)
+        and upper_wick > lower_wick
+        and c <= h - full_range * 0.5   # close in lower half of the bar
+    )
+
+
+def is_bullish_engulfing(prev: tuple[float, float, float, float], cur: tuple[float, float, float, float]) -> bool:
+    po, ph, pl, pc = prev
+    co, ch, cl, cc = cur
+    return pc < po and cc > co and cc >= po and co <= pc
+
+
+def is_bearish_engulfing(prev: tuple[float, float, float, float], cur: tuple[float, float, float, float]) -> bool:
+    po, ph, pl, pc = prev
+    co, ch, cl, cc = cur
+    return pc > po and cc < co and cc <= po and co >= pc
+
+
+# ---------------------------------------------------------------------------
+# Entry checker
+# ---------------------------------------------------------------------------
+
+def check_entry(
+    bars_5m: pd.DataFrame,   # columns: open, high, low, close, volume; needs >= 20 bars of history before "now"
+    zone: Zone,
+    rsi_period: int = 14,
+    rsi_oversold: float = 35.0,
+    rsi_overbought: float = 65.0,
+    volume_lookback: int = 20,
+    reaction_min_volume_ratio: float = 1.3,
+) -> ReactionSignal | None:
+    """
+    Check whether the LAST bar in bars_5m is a valid, confirmed reaction at
+    the given zone. Returns None if price isn't at the zone, or the reaction
+    doesn't clear all three checks.
+    """
+    if len(bars_5m) < max(rsi_period, volume_lookback) + 2:
+        return None
+
+    direction = "long" if zone.kind == "demand" else "short"
+
+    cur = bars_5m.iloc[-1]
+    prev = bars_5m.iloc[-2]
+
+    # Price must actually be at/inside the zone (touching it), not somewhere else.
+    touched = cur["low"] <= zone.price_high and cur["high"] >= zone.price_low
+    if not touched:
+        return None
+
+    rsi_series = rsi(bars_5m["close"], rsi_period)
+    cur_rsi = float(rsi_series.iloc[-1])
+
+    avg_vol = bars_5m["volume"].iloc[-(volume_lookback + 1):-1].mean()
+    vol_ratio = float(cur["volume"] / avg_vol) if avg_vol > 0 else 0.0
+
+    if direction == "long":
+        pattern = None
+        if is_bullish_pin_bar(cur["open"], cur["high"], cur["low"], cur["close"]):
+            pattern = "pin_bar"
+        elif is_bullish_engulfing(
+            (prev["open"], prev["high"], prev["low"], prev["close"]),
+            (cur["open"], cur["high"], cur["low"], cur["close"]),
+        ):
+            pattern = "engulfing"
+        if pattern is None:
+            return None
+        if cur_rsi > rsi_oversold:
+            return None
+        if vol_ratio < reaction_min_volume_ratio:
+            return None
+        return ReactionSignal(bars_5m.index[-1], "long", pattern, float(cur["close"]), cur_rsi, vol_ratio)
+
+    else:  # short
+        pattern = None
+        if is_bearish_pin_bar(cur["open"], cur["high"], cur["low"], cur["close"]):
+            pattern = "pin_bar"
+        elif is_bearish_engulfing(
+            (prev["open"], prev["high"], prev["low"], prev["close"]),
+            (cur["open"], cur["high"], cur["low"], cur["close"]),
+        ):
+            pattern = "engulfing"
+        if pattern is None:
+            return None
+        if cur_rsi < rsi_overbought:
+            return None
+        if vol_ratio < reaction_min_volume_ratio:
+            return None
+        return ReactionSignal(bars_5m.index[-1], "short", pattern, float(cur["close"]), cur_rsi, vol_ratio)
