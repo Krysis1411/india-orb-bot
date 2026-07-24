@@ -14,23 +14,26 @@ after the base:
 
 Reversal zones (DBR/RBD) are the powerful ones — the trend actually changes
 direction there, which is a much stronger signal than a continuation zone
-just extending a move that was already happening. Reversal zones get a
-strength bonus.
+just extending a move that was already happening. But a "reversal" only
+counts if the move INTO the base was a real rally/drop, not just drift: it
+needs both a real price move AND real volume behind it (same principle as
+the breakout leg below) — a price move on thin volume isn't a rally, it's
+noise.
 
 Zone strength is NOT just the size of the breakout move, and NOT just the
 volume -- it's both together. A big move on average volume, or an
 average-sized move on huge volume, is a weaker signal than a big move on
 high volume at the same time. base strength = move_strength_in_atr *
 volume_ratio (multiplicative, so a zone needs both factors to score highly,
-not just one) -- then reversal zones get an extra multiplier on top.
+not just one). Reversal zones then get their leg-in's own volume ratio
+folded in too, so a reversal backed by a heavier-volume rally/drop scores
+higher than one backed by a thinner one.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 import pandas as pd
-
-REVERSAL_BONUS = 1.5   # strength multiplier for DBR/RBD zones vs RBR/DBD
 
 
 @dataclass
@@ -45,6 +48,7 @@ class Zone:
     breakout_move_atr: float     # breakout leg's move, in multiples of ATR
     breakout_volume_ratio: float  # breakout leg's volume / recent average volume
     legin_move_atr: float = 0.0   # how many ATRs price moved INTO the base, signed
+    legin_volume_ratio: float = 0.0  # avg volume / recent avg volume during the leg-in
     timeframe: str = ""     # set by caller: "1d" | "1h"
     strength: float = field(init=False)
     touches: int = field(default=0, init=False)   # updated during backtest (freshness)
@@ -52,7 +56,7 @@ class Zone:
 
     def __post_init__(self) -> None:
         base = self.breakout_move_atr * self.breakout_volume_ratio
-        self.strength = round(base * REVERSAL_BONUS, 2) if self.is_reversal else round(base, 2)
+        self.strength = round(base * self.legin_volume_ratio, 2) if self.is_reversal else round(base, 2)
 
     @property
     def is_reversal(self) -> bool:
@@ -87,6 +91,7 @@ def find_zones(
     breakout_leg_bars: int = 3,          # breakout move can unfold over up to this many bars
     legin_bars: int = 8,                 # how many bars before the base define the leg-in direction
     legin_min_move_atr: float = 1.0,     # min move (in ATR) to call the leg-in a real trend, not noise
+    legin_min_volume_ratio: float = 1.0,  # leg-in avg volume >= this x recent avg volume (real rally, not drift)
     volume_lookback: int = 20,
     breakout_min_volume_ratio: float = 1.5,  # breakout volume >= this x recent avg volume
 ) -> list[Zone]:
@@ -132,13 +137,21 @@ def find_zones(
         # This is what separates a REVERSAL zone (trend flips here -- the powerful
         # kind, per DBR/RBD below) from a CONTINUATION zone (just extends a move
         # already in progress, RBR/DBD -- weaker). Compare price just before the
-        # base to price a few bars further back.
+        # base to price a few bars further back. A real rally/drop needs BOTH a
+        # real price move AND real volume behind it -- price drifting up on thin
+        # volume isn't a rally, it's noise, and shouldn't count as a reversal.
         legin_start_idx = max(0, base_start - legin_bars)
+        legin_slice = df.iloc[legin_start_idx:base_start]
         price_before_legin = df["close"].iloc[legin_start_idx]
         price_at_base = base_slice["close"].iloc[0]
         legin_move_atr = (price_at_base - price_before_legin) / atr
-        legin_up = legin_move_atr >= legin_min_move_atr      # rallied into the base
-        legin_down = legin_move_atr <= -legin_min_move_atr    # dropped into the base
+        if len(legin_slice) > 0 and legin_slice["avg_vol"].notna().any() and legin_slice["avg_vol"].max() > 0:
+            legin_volume_ratio = float((legin_slice["volume"] / legin_slice["avg_vol"]).mean())
+        else:
+            legin_volume_ratio = 0.0
+        legin_has_volume = legin_volume_ratio >= legin_min_volume_ratio
+        legin_up = legin_move_atr >= legin_min_move_atr and legin_has_volume        # real rally into the base
+        legin_down = legin_move_atr <= -legin_min_move_atr and legin_has_volume      # real drop into the base
 
         # --- check the next few bars (the "leg") for a breakout away from the base ---
         # Real breakout legs often unfold over 2-3 bars, not a single bar -- so we
@@ -172,6 +185,7 @@ def find_zones(
                     breakout_move_atr=round(float(move_up), 2),
                     breakout_volume_ratio=round(float(volume_ratio), 2),
                     legin_move_atr=round(float(legin_move_atr), 2),
+                    legin_volume_ratio=round(float(legin_volume_ratio), 2),
                     timeframe=timeframe,
                 )
                 zones.append(zone)
@@ -189,6 +203,7 @@ def find_zones(
                     breakout_move_atr=round(float(move_down), 2),
                     breakout_volume_ratio=round(float(volume_ratio), 2),
                     legin_move_atr=round(float(legin_move_atr), 2),
+                    legin_volume_ratio=round(float(legin_volume_ratio), 2),
                     timeframe=timeframe,
                 )
                 zones.append(zone)
