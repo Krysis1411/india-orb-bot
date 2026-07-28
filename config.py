@@ -113,3 +113,42 @@ INDIA_BLOCKLIST = [
     "HAL", "APOLLOHOSP", "INDUSINDBK", "CHOLAFIN", "TECHM",
     "BAJAJFINSV", "HAVELLS", "AXISBANK", "TRENT", "BANKBARODA", "GRASIM",
 ]
+
+# ---------------------------------------------------------------------------
+# Supply/Demand Zone strategy — symbol universe (strategies/zone_detector.py)
+# ---------------------------------------------------------------------------
+# Deliberately SEPARATE from INDIA_SYMBOLS/INDIA_BLOCKLIST above — those were
+# curated and validated specifically for the ORB strategy (grid-search PF,
+# blocklist entries tied to ORB backtest losses). The zone strategy is a
+# different trading style with no reason to inherit ORB-specific exclusions
+# -- e.g. ICICIBANK is ORB-blocklisted but produced a clean RBD reversal zone
+# (strength 8.04) that matched a hand-verified real chart example.
+#
+# No blocklist here (yet) -- nothing's been backtested long enough on the
+# zone strategy to justify excluding a symbol the way INDIA_BLOCKLIST does.
+ZONE_SYMBOLS = [
+    # Original 12-symbol ORB watchlist (kept — no reason to exclude a priori)
+    "TORNTPHARM", "BHARTIARTL", "JSWSTEEL", "BAJFINANCE", "GODREJCP",
+    "HCLTECH", "INFY", "VEDL", "DABUR", "DRREDDY", "HINDUNILVR", "ONGC",
+    # 45-symbol universe from the ORB universe backtest (reused as a
+    # convenient liquid-NSE-stock starting point, not because it's ORB-tuned)
+    "BPCL", "IDFCFIRSTB", "SUNPHARMA", "HINDALCO", "TATACONSUM", "POWERGRID",
+    "ADANIENT", "MARICO", "BRITANNIA", "RELIANCE", "DIVISLAB", "SIEMENS",
+    "PIDILITIND", "COALINDIA", "TATASTEEL", "CIPLA", "BEL", "FEDERALBNK",
+    "ULTRACEMCO", "GRASIM", "BANKBARODA", "AXISBANK", "TRENT", "HAVELLS",
+    "BAJAJFINSV", "TECHM", "INDUSINDBK", "APOLLOHOSP", "CHOLAFIN", "HAL",
+    "MUTHOOTFIN", "TVSMOTOR", "HEROMOTOCO", "EICHERMOT", "ABB",
+    # Added after user-provided reference chart examples (BANDHANBNK,
+    # ICICIBANK) confirmed the detector against real reversal zones
+    "BANDHANBNK", "ICICIBANK",
+    # Broader Nifty50/Nifty100 liquid names not yet covered above — grows the
+    # candidate pool for the confluence backtest (small sample size was the
+    # limiting factor, not the detector logic).
+    # TATAMOTORS and LTIM excluded — yfinance returns no data under either
+    # ticker as of 2026-07, likely stale post-split/rename; not worth chasing.
+    "HDFCBANK", "TCS", "SBIN", "KOTAKBANK", "ITC", "LT", "MARUTI", "WIPRO",
+    "HDFCLIFE", "NTPC", "ASIANPAINT", "NESTLEIND", "TITAN", "BAJAJ-AUTO",
+    "ADANIPORTS", "SBILIFE", "M&M", "UPL", "SHREECEM",
+    "TATAPOWER", "NAUKRI", "GAIL", "IOC", "AMBUJACEM", "LUPIN",
+    "AUROPHARMA", "COLPAL", "DLF",
+]
