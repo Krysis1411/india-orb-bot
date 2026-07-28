@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from backtest.fetch_nse_data import load_nse_bars_df
 from backtest.fetch_nse_multi_tf import load_bars_df
 from strategies.entry_confirmation import check_entry
+from strategies.indicators import has_bearish_divergence, has_bullish_divergence
 from strategies.zone_detector import Zone, find_zones
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -101,7 +102,8 @@ def run_symbol(
                 zone.broken = True
                 break
 
-            sig = check_entry(five.iloc[: pos + 1], zone)
+            sub = five.iloc[: pos + 1]
+            sig = check_entry(sub, zone)
             if sig is None:
                 pos += 1
                 continue
@@ -110,6 +112,7 @@ def run_symbol(
             entry_pos = pos
             entry_price = sig.price
             is_long = zone.kind == "demand"
+            has_divergence = has_bullish_divergence(sub) if is_long else has_bearish_divergence(sub)
             if is_long:
                 stop = zone.price_low * (1 - stop_buffer_pct)
                 risk = entry_price - stop
@@ -159,6 +162,7 @@ def run_symbol(
                 "zone_strength": zone.strength,
                 "confluent": is_confluent,
                 "confluent_hourly_pattern": confluent_hz.pattern if confluent_hz else None,
+                "has_divergence": has_divergence,
                 "touch_number": zone.touches,
                 "entry_ts": five_idx[entry_pos],
                 "entry_price": round(entry_price, 2),
@@ -248,6 +252,16 @@ def _print_breakdown(trades: list[dict]) -> None:
     print(f"  {'Group':<14} {'Trades':>7} {'Win%':>7} {'PF':>6} {'Total%':>8}")
     for label, group in [("Confluent", [t for t in trades if t["confluent"]]),
                           ("5-min only", [t for t in trades if not t["confluent"]])]:
+        s = _full_stats(group)
+        if not s:
+            print(f"  {label:<14} {'0':>7}")
+            continue
+        print(f"  {label:<14} {s['n']:>7} {s['win_rate']:>6.1f}% {s['profit_factor']:>6.2f} {s['total_pnl_pct']:>+7.2f}%")
+
+    print(f"\n  -- MACD divergence vs none (per tradingsetupsreview.com confluence) -")
+    print(f"  {'Group':<14} {'Trades':>7} {'Win%':>7} {'PF':>6} {'Total%':>8}")
+    for label, group in [("Divergence", [t for t in trades if t["has_divergence"]]),
+                          ("No divergence", [t for t in trades if not t["has_divergence"]])]:
         s = _full_stats(group)
         if not s:
             print(f"  {label:<14} {'0':>7}")
