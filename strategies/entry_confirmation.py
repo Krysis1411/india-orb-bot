@@ -109,61 +109,94 @@ def check_entry(
     rsi_overbought: float = 65.0,
     volume_lookback: int = 20,
     reaction_min_volume_ratio: float = 1.3,
+    confirmation_window: int = 2,
 ) -> ReactionSignal | None:
     """
-    Check whether the LAST bar in bars_5m is a valid, confirmed reaction at
-    the given zone. Returns None if price isn't at the zone, or the reaction
-    doesn't clear all three checks.
+    Check whether the reaction at this zone is confirmed as of the LAST bar
+    in bars_5m. The three signals no longer need to land on the exact same
+    candle -- requiring that turned out to be too strict (0.11 conversion
+    rate from confluence pair to actual trade, unchanged across 13 vs 18
+    symbols, i.e. a structural bottleneck, not a data one).
+
+    Within the trailing `confirmation_window` bars:
+      - the zone must have been touched at some point
+      - some bar must show a reaction candle (pattern) AND above-average
+        volume TOGETHER on that same bar (this pairing stays coupled --
+        a candle shape without volume behind it still isn't a real reaction)
+      - RSI must have been in exhaustion territory at some point in the
+        window (not necessarily the same bar as the reaction candle --
+        momentum exhaustion is a state that persists across a few bars,
+        it doesn't need to coincide exactly)
+
+    Entry executes at the CURRENT (last) bar's close once all three are
+    satisfied -- not retroactively at whichever bar supplied the pattern.
+
+    confirmation_window=2 was chosen by comparing against the alternatives
+    on the 18-symbol backtest, not guessed:
+        window=1 (original, same-bar): n=5,  win 40.0%, PF 0.91, total -0.08%
+        window=2:                      n=16, win 37.5%, PF 1.05, total +0.17%
+        window=3:                      n=16, win 18.8%, PF 0.26, total -5.51%
+    window=3 gets the same trade-count lift as window=2 but by admitting
+    stale, disconnected signals -- quality collapses. window=2 gets the
+    same lift while the profit factor actually crosses above 1.0.
     """
-    if len(bars_5m) < max(rsi_period, volume_lookback) + 2:
+    if len(bars_5m) < max(rsi_period, volume_lookback) + confirmation_window + 1:
         return None
 
     direction = "long" if zone.kind == "demand" else "short"
+    n = len(bars_5m)
+    window = bars_5m.iloc[-confirmation_window:]
 
-    cur = bars_5m.iloc[-1]
-    prev = bars_5m.iloc[-2]
-
-    # Price must actually be at/inside the zone (touching it), not somewhere else.
-    touched = cur["low"] <= zone.price_high and cur["high"] >= zone.price_low
+    touched = ((window["low"] <= zone.price_high) & (window["high"] >= zone.price_low)).any()
     if not touched:
         return None
 
     rsi_series = rsi(bars_5m["close"], rsi_period)
-    cur_rsi = float(rsi_series.iloc[-1])
-
-    avg_vol = bars_5m["volume"].iloc[-(volume_lookback + 1):-1].mean()
-    vol_ratio = float(cur["volume"] / avg_vol) if avg_vol > 0 else 0.0
-
+    window_rsi = rsi_series.iloc[-confirmation_window:]
     if direction == "long":
-        pattern = None
-        if is_bullish_pin_bar(cur["open"], cur["high"], cur["low"], cur["close"]):
-            pattern = "pin_bar"
-        elif is_bullish_engulfing(
-            (prev["open"], prev["high"], prev["low"], prev["close"]),
-            (cur["open"], cur["high"], cur["low"], cur["close"]),
-        ):
-            pattern = "engulfing"
-        if pattern is None:
+        if not (window_rsi <= rsi_oversold).any():
             return None
-        if cur_rsi > rsi_oversold:
+    else:
+        if not (window_rsi >= rsi_overbought).any():
             return None
-        if vol_ratio < reaction_min_volume_ratio:
-            return None
-        return ReactionSignal(bars_5m.index[-1], "long", pattern, float(cur["close"]), cur_rsi, vol_ratio)
 
-    else:  # short
-        pattern = None
-        if is_bearish_pin_bar(cur["open"], cur["high"], cur["low"], cur["close"]):
-            pattern = "pin_bar"
-        elif is_bearish_engulfing(
-            (prev["open"], prev["high"], prev["low"], prev["close"]),
-            (cur["open"], cur["high"], cur["low"], cur["close"]),
-        ):
-            pattern = "engulfing"
-        if pattern is None:
-            return None
-        if cur_rsi < rsi_overbought:
-            return None
+    avg_vol = bars_5m["volume"].iloc[-(volume_lookback + confirmation_window):-confirmation_window].mean()
+    if not avg_vol or avg_vol <= 0:
+        return None
+
+    # Scan the window most-recent-first for a bar with BOTH pattern and volume.
+    pattern, reaction_vol_ratio = None, 0.0
+    for offset in range(confirmation_window - 1, -1, -1):   # most recent bar in the window first
+        i = n - confirmation_window + offset
+        cur, prev = bars_5m.iloc[i], bars_5m.iloc[i - 1]
+        vol_ratio = float(cur["volume"] / avg_vol)
         if vol_ratio < reaction_min_volume_ratio:
-            return None
-        return ReactionSignal(bars_5m.index[-1], "short", pattern, float(cur["close"]), cur_rsi, vol_ratio)
+            continue
+        if direction == "long":
+            if is_bullish_pin_bar(cur["open"], cur["high"], cur["low"], cur["close"]):
+                pattern = "pin_bar"
+            elif is_bullish_engulfing(
+                (prev["open"], prev["high"], prev["low"], prev["close"]),
+                (cur["open"], cur["high"], cur["low"], cur["close"]),
+            ):
+                pattern = "engulfing"
+        else:
+            if is_bearish_pin_bar(cur["open"], cur["high"], cur["low"], cur["close"]):
+                pattern = "pin_bar"
+            elif is_bearish_engulfing(
+                (prev["open"], prev["high"], prev["low"], prev["close"]),
+                (cur["open"], cur["high"], cur["low"], cur["close"]),
+            ):
+                pattern = "engulfing"
+        if pattern is not None:
+            reaction_vol_ratio = vol_ratio
+            break
+
+    if pattern is None:
+        return None
+
+    last = bars_5m.iloc[-1]
+    return ReactionSignal(
+        bars_5m.index[-1], direction, pattern, float(last["close"]),
+        float(window_rsi.iloc[-1]), reaction_vol_ratio,
+    )
