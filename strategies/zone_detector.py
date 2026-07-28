@@ -69,6 +69,17 @@ class Zone:
     def contains(self, price: float) -> bool:
         return self.price_low <= price <= self.price_high
 
+    def is_invalidated_by(self, close: float, buffer_pct: float = 0.002) -> bool:
+        """
+        True if `close` breaks decisively through the zone, invalidating it as
+        support/resistance going forward -- a demand zone whose low gets
+        closed below, or a supply zone whose high gets closed above (with a
+        small buffer so a wick/noise close doesn't falsely invalidate it).
+        """
+        if self.kind == "demand":
+            return close < self.price_low * (1 - buffer_pct)
+        return close > self.price_high * (1 + buffer_pct)
+
 
 def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     high, low, close = df["high"], df["low"], df["close"]

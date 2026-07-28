@@ -1,16 +1,24 @@
 """
-Supply/demand zone backtest — multi-timeframe confluence + entry confirmation.
+Supply/demand zone backtest — 5-min zones (tradeable on their own) + optional
+higher-timeframe confluence (a strength boost, not a requirement) + multi-touch
++ entry confirmation.
 
 Full trade pipeline:
-  1. Find REVERSAL zones (DBR/RBD) on the higher timeframe (1h) -- the "bigger
-     picture" zones, per strategies/zone_detector.py.
-  2. Find zones independently on the lower/execution timeframe (5m).
-  3. Require CONFLUENCE: a trade is only considered where an hourly zone's
-     price range overlaps a 5-min zone's price range. The 5-min zone's
-     (tighter) boundaries are used for the actual entry/stop, since it's the
-     more precise of the two.
-  4. Within a confluent zone, wait for entry CONFIRMATION on 5-min bars --
-     reaction candle + RSI exhaustion + volume (strategies/entry_confirmation.py).
+  1. Find REVERSAL zones (DBR/RBD) independently on both 1h and 5m.
+  2. 5-min zones are the tradeable unit -- their tighter boundaries are what
+     price actually interacts with. An overlapping 1h zone is recorded as
+     `confluent=True` and logged, not required -- per hand-verified real
+     chart examples (RECLTD/SBIN), a clean 5-min-only reversal is a real,
+     tradeable setup; a matching 1h zone just makes it a stronger one.
+  3. Zones are no longer one-shot: a still-valid zone can produce MULTIPLE
+     trades as price returns to it (per the SHREECEM example -- the same
+     supply zone rejected price twice). Capped at MAX_TOUCHES per zone, and
+     retired early if price closes decisively through it (`is_invalidated_by`).
+     touch_number is recorded on every trade specifically so win-rate-by-touch
+     can be checked empirically -- theory says later touches should be weaker
+     (resting orders get used up), but that's a claim to verify against real
+     results, not something to bake into the entry logic blind.
+  4. Within a live zone, wait for entry CONFIRMATION (strategies/entry_confirmation.py).
   5. Stop beyond the zone; target at a fixed reward:risk multiple.
 
 This is a swing-style setup (hourly/daily zones), not an intraday-only system
@@ -34,29 +42,21 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from backtest.fetch_nse_data import load_nse_bars_df
 from backtest.fetch_nse_multi_tf import load_bars_df
 from strategies.entry_confirmation import check_entry
-from strategies.zone_detector import Zone, find_confluence, find_zones
+from strategies.zone_detector import Zone, find_zones
 
 DATA_DIR = Path(__file__).parent / "data"
 RESULTS_DIR = Path(__file__).parent / "results"
 
+MAX_TOUCHES = 3
+INVALIDATION_BUFFER_PCT = 0.002
 
-def _confluent_execution_zone(h_zone: Zone, m_zone: Zone) -> Zone:
-    """Build the tradeable zone from a confluence pair -- 5-min boundaries (tighter/more
-    precise), hourly's kind/pattern (the validated "bigger picture" reversal)."""
-    return Zone(
-        kind=h_zone.kind,
-        pattern=h_zone.pattern,
-        price_low=m_zone.price_low,
-        price_high=m_zone.price_high,
-        base_start=m_zone.base_start,
-        base_end=m_zone.base_end,
-        breakout_ts=max(h_zone.breakout_ts, m_zone.breakout_ts),
-        breakout_move_atr=h_zone.breakout_move_atr,
-        breakout_volume_ratio=h_zone.breakout_volume_ratio,
-        legin_move_atr=h_zone.legin_move_atr,
-        legin_volume_ratio=h_zone.legin_volume_ratio,
-        timeframe="confluence",
-    )
+
+def _confluent_hourly_zone(m_zone: Zone, h_zones: list[Zone]) -> Zone | None:
+    """The overlapping hourly reversal zone for this 5-min zone, if any (first match)."""
+    for hz in h_zones:
+        if hz.kind == m_zone.kind and m_zone.price_low <= hz.price_high and hz.price_low <= m_zone.price_high:
+            return hz
+    return None
 
 
 def run_symbol(
@@ -64,106 +64,116 @@ def run_symbol(
     stop_buffer_pct: float = 0.002,
     target_rr: float = 2.0,
     max_hold_bars: int = 1500,   # ~ a few weeks of 5-min bars; backstop, not the primary exit
+    max_touches: int = MAX_TOUCHES,
 ) -> list[dict]:
     h_path = DATA_DIR / f"{symbol}_NSE_1h.parquet"
     m_path = DATA_DIR / f"{symbol}_NSE_5m.parquet"
-    if not h_path.exists() or not m_path.exists():
+    if not m_path.exists():
         return []
 
-    hourly = load_bars_df(h_path)
     five = load_nse_bars_df(m_path)
-
-    h_zones = [z for z in find_zones(hourly, timeframe="1h") if z.is_reversal]
-    m_zones = find_zones(five, timeframe="5m")
-    pairs = find_confluence(h_zones, m_zones)
-    if not pairs:
+    m_zones = [z for z in find_zones(five, timeframe="5m") if z.is_reversal]
+    if not m_zones:
         return []
+
+    h_zones: list[Zone] = []
+    if h_path.exists():
+        hourly = load_bars_df(h_path)
+        h_zones = [z for z in find_zones(hourly, timeframe="1h") if z.is_reversal]
 
     trades: list[dict] = []
     five_idx = five.index
+    n = len(five)
 
-    for h_zone, m_zone in pairs:
-        zone = _confluent_execution_zone(h_zone, m_zone)
+    for zone in m_zones:
+        confluent_hz = _confluent_hourly_zone(zone, h_zones)
+        is_confluent = confluent_hz is not None
+
         start_pos = five_idx.searchsorted(zone.breakout_ts, side="right")
-        if start_pos < 25:
-            start_pos = 25
-        if start_pos >= len(five):
+        start_pos = max(start_pos, 25)
+        if start_pos >= n:
             continue
 
-        # walk forward from when the zone is confirmed, looking for a confirmed reaction
-        entry_pos = None
-        signal = None
-        for i in range(start_pos, len(five)):
-            sub = five.iloc[: i + 1]
-            sig = check_entry(sub, zone)
-            if sig:
-                entry_pos = i
-                signal = sig
+        pos = start_pos
+        while pos < n and zone.touches < max_touches and not zone.broken:
+            close = float(five.iloc[pos]["close"])
+            if zone.is_invalidated_by(close, INVALIDATION_BUFFER_PCT):
+                zone.broken = True
                 break
 
-        if entry_pos is None:
-            continue
-
-        entry_price = signal.price
-        is_long = zone.kind == "demand"
-        if is_long:
-            stop = zone.price_low * (1 - stop_buffer_pct)
-            risk = entry_price - stop
-            if risk <= 0:
+            sig = check_entry(five.iloc[: pos + 1], zone)
+            if sig is None:
+                pos += 1
                 continue
-            target = entry_price + risk * target_rr
-        else:
-            stop = zone.price_high * (1 + stop_buffer_pct)
-            risk = stop - entry_price
-            if risk <= 0:
-                continue
-            target = entry_price - risk * target_rr
 
-        exit_price, exit_reason, exit_pos = None, None, None
-        hold_end = min(entry_pos + 1 + max_hold_bars, len(five))
-        for j in range(entry_pos + 1, hold_end):
-            bar = five.iloc[j]
+            zone.touches += 1
+            entry_pos = pos
+            entry_price = sig.price
+            is_long = zone.kind == "demand"
             if is_long:
-                if bar["low"] <= stop:
-                    exit_price, exit_reason = stop, "stop_loss"
-                elif bar["high"] >= target:
-                    exit_price, exit_reason = target, "take_profit"
+                stop = zone.price_low * (1 - stop_buffer_pct)
+                risk = entry_price - stop
+                target = entry_price + risk * target_rr if risk > 0 else None
             else:
-                if bar["high"] >= stop:
-                    exit_price, exit_reason = stop, "stop_loss"
-                elif bar["low"] <= target:
-                    exit_price, exit_reason = target, "take_profit"
-            if exit_price is not None:
-                exit_pos = j
-                break
+                stop = zone.price_high * (1 + stop_buffer_pct)
+                risk = stop - entry_price
+                target = entry_price - risk * target_rr if risk > 0 else None
 
-        if exit_price is None:
-            exit_pos = hold_end - 1
-            exit_price = float(five.iloc[exit_pos]["close"])
-            exit_reason = "max_hold"
+            if target is None:
+                pos += 1
+                continue
 
-        pnl_pct = (
-            (exit_price - entry_price) / entry_price * 100 if is_long
-            else (entry_price - exit_price) / entry_price * 100
-        )
-        trades.append({
-            "symbol": symbol,
-            "direction": "long" if is_long else "short",
-            "pattern": zone.pattern,
-            "zone_low": zone.price_low,
-            "zone_high": zone.price_high,
-            "zone_strength": h_zone.strength,
-            "entry_ts": five_idx[entry_pos],
-            "entry_price": round(entry_price, 2),
-            "reaction_pattern": signal.pattern,
-            "reaction_rsi": round(signal.rsi, 1),
-            "reaction_vol_ratio": round(signal.volume_ratio, 2),
-            "exit_ts": five_idx[exit_pos],
-            "exit_price": round(exit_price, 2),
-            "exit_reason": exit_reason,
-            "pnl_pct": round(pnl_pct, 3),
-            "hold_bars": exit_pos - entry_pos,
-        })
+            exit_price, exit_reason, exit_pos = None, None, None
+            hold_end = min(entry_pos + 1 + max_hold_bars, n)
+            for j in range(entry_pos + 1, hold_end):
+                bar = five.iloc[j]
+                if is_long:
+                    if bar["low"] <= stop:
+                        exit_price, exit_reason = stop, "stop_loss"
+                    elif bar["high"] >= target:
+                        exit_price, exit_reason = target, "take_profit"
+                else:
+                    if bar["high"] >= stop:
+                        exit_price, exit_reason = stop, "stop_loss"
+                    elif bar["low"] <= target:
+                        exit_price, exit_reason = target, "take_profit"
+                if exit_price is not None:
+                    exit_pos = j
+                    break
+
+            if exit_price is None:
+                exit_pos = hold_end - 1
+                exit_price = float(five.iloc[exit_pos]["close"])
+                exit_reason = "max_hold"
+
+            pnl_pct = (
+                (exit_price - entry_price) / entry_price * 100 if is_long
+                else (entry_price - exit_price) / entry_price * 100
+            )
+            trades.append({
+                "symbol": symbol,
+                "direction": "long" if is_long else "short",
+                "pattern": zone.pattern,
+                "zone_low": zone.price_low,
+                "zone_high": zone.price_high,
+                "zone_strength": zone.strength,
+                "confluent": is_confluent,
+                "confluent_hourly_pattern": confluent_hz.pattern if confluent_hz else None,
+                "touch_number": zone.touches,
+                "entry_ts": five_idx[entry_pos],
+                "entry_price": round(entry_price, 2),
+                "reaction_pattern": sig.pattern,
+                "reaction_rsi": round(sig.rsi, 1),
+                "reaction_vol_ratio": round(sig.volume_ratio, 2),
+                "exit_ts": five_idx[exit_pos],
+                "exit_price": round(exit_price, 2),
+                "exit_reason": exit_reason,
+                "pnl_pct": round(pnl_pct, 3),
+                "hold_bars": exit_pos - entry_pos,
+            })
+
+            # resume scanning for a FURTHER touch only after this trade has closed
+            pos = exit_pos + 1
 
     return trades
 
@@ -219,6 +229,32 @@ def _print_full_stats(stats: dict, label: str) -> None:
     print(f"  Total return (sum)  : {stats['total_pnl_pct']:+.2f}%")
 
 
+def _print_breakdown(trades: list[dict]) -> None:
+    """Checks the two hypotheses from the reversal-zone chart review empirically,
+    instead of assuming them: do later touches perform worse, does confluence help."""
+    if not trades:
+        return
+
+    print(f"\n  -- By touch number (does zone strength decay with re-tests?) ------")
+    print(f"  {'Touch #':<8} {'Trades':>7} {'Win%':>7} {'PF':>6} {'Total%':>8}")
+    by_touch: dict[int, list[dict]] = {}
+    for t in trades:
+        by_touch.setdefault(t["touch_number"], []).append(t)
+    for touch_num in sorted(by_touch):
+        s = _full_stats(by_touch[touch_num])
+        print(f"  {touch_num:<8} {s['n']:>7} {s['win_rate']:>6.1f}% {s['profit_factor']:>6.2f} {s['total_pnl_pct']:>+7.2f}%")
+
+    print(f"\n  -- Confluent (1h+5m overlap) vs 5-min-only ------------------------")
+    print(f"  {'Group':<14} {'Trades':>7} {'Win%':>7} {'PF':>6} {'Total%':>8}")
+    for label, group in [("Confluent", [t for t in trades if t["confluent"]]),
+                          ("5-min only", [t for t in trades if not t["confluent"]])]:
+        s = _full_stats(group)
+        if not s:
+            print(f"  {label:<14} {'0':>7}")
+            continue
+        print(f"  {label:<14} {s['n']:>7} {s['win_rate']:>6.1f}% {s['profit_factor']:>6.2f} {s['total_pnl_pct']:>+7.2f}%")
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
     default_syms = ["TORNTPHARM", "ADANIENT", "TRENT", "PIDILITIND", "EICHERMOT", "HAL",
@@ -249,6 +285,7 @@ if __name__ == "__main__":
     if all_trades:
         pd.DataFrame(all_trades).to_csv(RESULTS_DIR / "zone_backtest_trades.csv", index=False)
         _print_full_stats(_full_stats(all_trades), "Combined (all symbols)")
+        _print_breakdown(all_trades)
         print(f"\n  Saved -> {RESULTS_DIR / 'zone_backtest_trades.csv'}")
     else:
         print("\nNo trades across any symbol.")
