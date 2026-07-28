@@ -1,4 +1,6 @@
 symbol,direction,pattern,zone_low,zone_high,zone_strength,entry_ts,entry_price,reaction_pattern,reaction_rsi,reaction_vol_ratio,exit_ts,exit_price,exit_reason,pnl_pct,hold_bars
+BAJFINANCE,long,DBR,1016.0,1016.5,5.9,2026-07-24 04:20:00+00:00,1015.0,pin_bar,15.4,1.84,2026-07-24 04:25:00+00:00,1013.97,stop_loss,-0.102,1
+HAL,long,DBR,4649.0,4656.7998046875,8.3,2026-05-12 04:00:00+00:00,4650.0,pin_bar,11.6,1.59,2026-05-12 04:15:00+00:00,4670.6,take_profit,0.443,3
 EICHERMOT,short,RBD,7141.5,7149.0,22.67,2026-04-24 06:45:00+00:00,7149.5,pin_bar,65.2,1.87,2026-04-24 07:05:00+00:00,7121.9,take_profit,0.386,4
 EICHERMOT,long,DBR,7100.5,7104.0,4.92,2026-06-01 08:50:00+00:00,7113.5,pin_bar,28.7,4.9,2026-06-01 09:50:00+00:00,7086.3,stop_loss,-0.382,12
 EICHERMOT,long,DBR,7107.5,7113.5,4.92,2026-05-12 09:45:00+00:00,7123.5,engulfing,28.0,2.75,2026-05-13 03:45:00+00:00,7093.28,stop_loss,-0.424,3
