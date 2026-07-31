@@ -19,7 +19,22 @@ Full trade pipeline:
      (resting orders get used up), but that's a claim to verify against real
      results, not something to bake into the entry logic blind.
   4. Within a live zone, wait for entry CONFIRMATION (strategies/entry_confirmation.py).
-  5. Stop beyond the zone; target at a fixed reward:risk multiple.
+     A signal is only ACCEPTED if the resulting stop distance clears
+     MIN_RISK_ATR_MULT x the 5-min ATR -- trade-log forensics on an earlier
+     run found ~1/3 of trades entered with a stop distance smaller than one
+     typical bar's noise, and those stopped out within 1 bar most of the time
+     regardless of whether the reversal thesis was right (25-38% win rate vs
+     55-58% for properly-spaced trades). If a touch doesn't leave the stop
+     room to breathe, it's skipped and the scan keeps looking for a better
+     one -- see the comment on MIN_RISK_ATR_MULT below for the numbers.
+  5. Stop beyond the zone; target at a fixed reward:risk multiple, with
+     breakeven + trailing-stop management on top (Kaufman "Trading Systems and
+     Methods" Ch.23 + Elder's Triple-Screen, see docs/kaufman-tsam-notes.md):
+     once profit reaches BREAKEVEN_TRIGGER_R, the stop moves to entry price;
+     past that, it trails to protect TRAIL_PROFIT_PCT of the peak favorable
+     excursion. The stop only ever moves in the favorable direction (never
+     retreats), and is evaluated one bar AFTER the excursion that set it, to
+     avoid same-bar look-ahead (we don't have intrabar high/low ordering).
 
 This is a swing-style setup (hourly/daily zones), not an intraday-only system
 like the ORB bot -- trades are allowed to run for multiple days, capped by
@@ -41,15 +56,60 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from backtest.fetch_nse_data import load_nse_bars_df
 from backtest.fetch_nse_multi_tf import load_bars_df
-from strategies.entry_confirmation import check_entry
+from strategies.entry_confirmation import check_entry, rsi
 from strategies.indicators import has_bearish_divergence, has_bullish_divergence
-from strategies.zone_detector import Zone, find_zones
+from strategies.zone_detector import Zone, atr_series, find_zones
 
 DATA_DIR = Path(__file__).parent / "data"
 RESULTS_DIR = Path(__file__).parent / "results"
 
 MAX_TOUCHES = 3
 INVALIDATION_BUFFER_PCT = 0.002
+# check_entry/has_*_divergence only ever look at trailing windows <= ~66 bars
+# (rsi/volume lookback, confirmation_window, MACD's lookback+26 warmup). Slicing
+# `five.iloc[:pos+1]` from bar 0 every scan bar was O(pos) per bar -> O(n^2) per
+# zone; a fixed trailing window gives identical signals at O(1) per bar instead.
+WARMUP_WINDOW = 300
+BREAKEVEN_TRIGGER_R = 1.0    # move stop to entry once profit reaches this many R
+TRAIL_PROFIT_PCT = 0.5       # once past breakeven, protect this fraction of peak profit
+
+# Trade-log forensics (backtest/results/zone_backtest_trades.csv, 102-trade run):
+# 33/102 trades entered with the stop-to-entry distance (risk) smaller than a
+# typical single 5-min bar's high-low range for that symbol (median stop
+# distance 0.17% vs a typical bar range of 0.15-0.28%). Those trades stopped
+# out within 1 bar 26/33 times, win rate 30% vs 55% for properly-spaced
+# trades -- normal noise was taking the stop out regardless of whether the
+# reversal thesis was right. Root cause: the stop buffer is a fixed % beyond
+# the zone edge with no floor, so a confirmation that fires late (entry
+# already close to or past the zone boundary) produces a stop sitting inside
+# ordinary chop. Fix: require the stop distance to be at least this many
+# multiples of the 5-min ATR -- if a touch doesn't leave enough room, skip it
+# and keep scanning for a better one, rather than taking a trade that's
+# already lost before the first bar closes.
+MIN_RISK_ATR_MULT = 1.0
+
+# Every rule/parameter in this file (legin thresholds, confirmation_window,
+# MAX_TOUCHES, the trailing-stop constants above, ...) has so far been tuned by
+# repeatedly re-running against the full cached dataset -- exactly the
+# in-sample "torture" Kaufman's Ch.21 says is fine during design, but it means
+# NOTHING run against that full range can be reported as a validated result.
+# OOS_START marks a holdout suffix that has NOT been used to justify any of the
+# above choices. Per Kaufman: out-of-sample data gets used *exactly once* --
+# do not re-tune parameters based on the OOS numbers this produces. If the OOS
+# result is bad, the honest conclusion is "this rule set doesn't hold up out of
+# sample," not "let's adjust one more threshold and check again" (that's
+# exactly the contamination that produced the confirmation_window=2 result
+# which later inverted on more data).
+OOS_START = pd.Timestamp("2026-05-01", tz="UTC")
+
+# Miner's "High Probability Trading Strategies" (see docs/miner-hpts-notes.md) Dual
+# Time Frame Momentum filter: for a COUNTERtrend/reversal trade -- which is all we
+# ever take, since we only trade DBR/RBD reversal zones -- his own rule table favors
+# it precisely when the HIGHER timeframe momentum is stretched into overbought (for a
+# short) or oversold (for a long), not just trending. Logged like `confluent` and
+# `has_divergence`: a candidate confluence factor to check empirically, not a filter.
+HTF_RSI_OVERSOLD = 30.0
+HTF_RSI_OVERBOUGHT = 70.0
 
 
 def _confluent_hourly_zone(m_zone: Zone, h_zones: list[Zone]) -> Zone | None:
@@ -66,6 +126,8 @@ def run_symbol(
     target_rr: float = 2.0,
     max_hold_bars: int = 1500,   # ~ a few weeks of 5-min bars; backstop, not the primary exit
     max_touches: int = MAX_TOUCHES,
+    enforce_body_filter: bool = True,   # False: for review exports -- keep+tag wick-dominated bases
+    enforce_gap_filter: bool = True,    # False: for review exports -- keep+tag gap-contaminated legs
 ) -> list[dict]:
     h_path = DATA_DIR / f"{symbol}_NSE_1h.parquet"
     m_path = DATA_DIR / f"{symbol}_NSE_5m.parquet"
@@ -73,14 +135,39 @@ def run_symbol(
         return []
 
     five = load_nse_bars_df(m_path)
-    m_zones = [z for z in find_zones(five, timeframe="5m") if z.is_reversal]
+    m_zones = [
+        z for z in find_zones(
+            five, timeframe="5m",
+            enforce_body_filter=enforce_body_filter,
+            enforce_gap_filter=enforce_gap_filter,
+        ) if z.is_reversal
+    ]
     if not m_zones:
         return []
+    five_atr = atr_series(five, 14)
 
     h_zones: list[Zone] = []
+    hourly_rsi: pd.Series | None = None
+    hourly_idx: pd.DatetimeIndex | None = None
     if h_path.exists():
         hourly = load_bars_df(h_path)
         h_zones = [z for z in find_zones(hourly, timeframe="1h") if z.is_reversal]
+        hourly_rsi = rsi(hourly["close"])
+        hourly_idx = hourly.index
+
+    def _htf_momentum_supports(direction: str, entry_ts: pd.Timestamp) -> bool:
+        """True if the most recently completed 1h bar's RSI is on our side of the
+        OB/OS extreme -- oversold for a long, overbought for a short (see
+        docs/miner-hpts-notes.md, Dual Time Frame Momentum filter)."""
+        if hourly_rsi is None:
+            return False
+        i = hourly_idx.searchsorted(entry_ts, side="right") - 1
+        if i < 0:
+            return False
+        val = hourly_rsi.iloc[i]
+        if pd.isna(val):
+            return False
+        return val <= HTF_RSI_OVERSOLD if direction == "long" else val >= HTF_RSI_OVERBOUGHT
 
     trades: list[dict] = []
     five_idx = five.index
@@ -90,7 +177,14 @@ def run_symbol(
         confluent_hz = _confluent_hourly_zone(zone, h_zones)
         is_confluent = confluent_hz is not None
 
-        start_pos = five_idx.searchsorted(zone.breakout_ts, side="right")
+        # Scan from confirmed_ts (end of the breakout leg), not breakout_ts
+        # (its start) -- the zone's breakout_move_atr/volume_ratio aren't
+        # knowable until the whole leg has been observed, so starting from
+        # breakout_ts lets the backtest "see" a touch/entry in the 1-2 bars
+        # before a live system could have known this zone existed at all.
+        # Found by building zone_paper_trader.py and replaying real history
+        # through it causally (strategies/zone_detector.py Zone.confirmed_ts).
+        start_pos = five_idx.searchsorted(zone.confirmed_ts, side="right")
         start_pos = max(start_pos, 25)
         if start_pos >= n:
             continue
@@ -102,47 +196,87 @@ def run_symbol(
                 zone.broken = True
                 break
 
-            sub = five.iloc[: pos + 1]
+            sub = five.iloc[max(0, pos + 1 - WARMUP_WINDOW): pos + 1]
             sig = check_entry(sub, zone)
             if sig is None:
                 pos += 1
                 continue
 
-            zone.touches += 1
             entry_pos = pos
             entry_price = sig.price
             is_long = zone.kind == "demand"
-            has_divergence = has_bullish_divergence(sub) if is_long else has_bearish_divergence(sub)
             if is_long:
                 stop = zone.price_low * (1 - stop_buffer_pct)
                 risk = entry_price - stop
-                target = entry_price + risk * target_rr if risk > 0 else None
             else:
                 stop = zone.price_high * (1 + stop_buffer_pct)
                 risk = stop - entry_price
-                target = entry_price - risk * target_rr if risk > 0 else None
 
-            if target is None:
+            atr_here = five_atr.iloc[entry_pos]
+            min_risk = MIN_RISK_ATR_MULT * atr_here if pd.notna(atr_here) and atr_here > 0 else 0.0
+            if risk <= 0 or risk < min_risk:
+                # No room left for the stop to breathe -- confirmation fired
+                # too close to (or past) the zone edge. Not a trade; keep
+                # scanning for a touch that leaves the stop outside normal
+                # noise instead of taking one that's already lost.
                 pos += 1
                 continue
 
+            target = entry_price + risk * target_rr if is_long else entry_price - risk * target_rr
+
+            zone.touches += 1
+            has_divergence = has_bullish_divergence(sub) if is_long else has_bearish_divergence(sub)
+            has_htf_momentum = _htf_momentum_supports("long" if is_long else "short", five_idx[entry_pos])
+
             exit_price, exit_reason, exit_pos = None, None, None
             hold_end = min(entry_pos + 1 + max_hold_bars, n)
+            cur_stop = stop
+            peak = entry_price   # best favorable excursion seen so far
             for j in range(entry_pos + 1, hold_end):
                 bar = five.iloc[j]
+                if bar["volume"] <= 0:
+                    # Chart-review finding: a DRREDDY trade's trailing-stop
+                    # exit landed on a bar with volume=0 but a real-looking
+                    # 12.9-point range (~4.3x normal) -- not a flat print
+                    # (which the zero-width zone fix already catches), but a
+                    # bar where nothing actually traded despite a nonzero
+                    # printed range, most often right at a session boundary.
+                    # No real trading happened here, so it can't have
+                    # genuinely triggered a stop or target -- skip it and
+                    # keep watching for the next real bar. Not rare either:
+                    # 0.3-1.3% of bars per symbol had volume=0 in a spot check.
+                    continue
                 if is_long:
-                    if bar["low"] <= stop:
-                        exit_price, exit_reason = stop, "stop_loss"
+                    if bar["low"] <= cur_stop:
+                        exit_price = cur_stop
+                        exit_reason = "trailing_stop" if cur_stop > stop else "stop_loss"
                     elif bar["high"] >= target:
                         exit_price, exit_reason = target, "take_profit"
                 else:
-                    if bar["high"] >= stop:
-                        exit_price, exit_reason = stop, "stop_loss"
+                    if bar["high"] >= cur_stop:
+                        exit_price = cur_stop
+                        exit_reason = "trailing_stop" if cur_stop < stop else "stop_loss"
                     elif bar["low"] <= target:
                         exit_price, exit_reason = target, "take_profit"
                 if exit_price is not None:
                     exit_pos = j
                     break
+
+                # Update the trailing stop from THIS bar's excursion -- takes
+                # effect starting next bar, never this one (avoids assuming
+                # intrabar high/low ordering we don't actually have).
+                if is_long:
+                    peak = max(peak, float(bar["high"]))
+                    profit_r = (peak - entry_price) / risk
+                    if profit_r >= BREAKEVEN_TRIGGER_R:
+                        trail = entry_price + TRAIL_PROFIT_PCT * (peak - entry_price)
+                        cur_stop = max(cur_stop, entry_price, trail)
+                else:
+                    peak = min(peak, float(bar["low"]))
+                    profit_r = (entry_price - peak) / risk
+                    if profit_r >= BREAKEVEN_TRIGGER_R:
+                        trail = entry_price - TRAIL_PROFIT_PCT * (entry_price - peak)
+                        cur_stop = min(cur_stop, entry_price, trail)
 
             if exit_price is None:
                 exit_pos = hold_end - 1
@@ -163,6 +297,9 @@ def run_symbol(
                 "confluent": is_confluent,
                 "confluent_hourly_pattern": confluent_hz.pattern if confluent_hz else None,
                 "has_divergence": has_divergence,
+                "has_htf_momentum": has_htf_momentum,
+                "passes_body_filter": zone.passes_body_filter,
+                "passes_gap_filter": zone.passes_gap_filter,
                 "touch_number": zone.touches,
                 "entry_ts": five_idx[entry_pos],
                 "entry_price": round(entry_price, 2),
@@ -268,13 +405,58 @@ def _print_breakdown(trades: list[dict]) -> None:
             continue
         print(f"  {label:<14} {s['n']:>7} {s['win_rate']:>6.1f}% {s['profit_factor']:>6.2f} {s['total_pnl_pct']:>+7.2f}%")
 
+    print(f"\n  -- 1h momentum OB/OS support vs none (Miner's Dual TF filter, see docs/miner-hpts-notes.md) -")
+    print(f"  {'Group':<14} {'Trades':>7} {'Win%':>7} {'PF':>6} {'Total%':>8}")
+    for label, group in [("HTF support", [t for t in trades if t["has_htf_momentum"]]),
+                          ("No HTF support", [t for t in trades if not t["has_htf_momentum"]])]:
+        s = _full_stats(group)
+        if not s:
+            print(f"  {label:<14} {'0':>7}")
+            continue
+        print(f"  {label:<14} {s['n']:>7} {s['win_rate']:>6.1f}% {s['profit_factor']:>6.2f} {s['total_pnl_pct']:>+7.2f}%")
+
+
+def _print_walkforward(trades: list[dict], folds: int = 4) -> None:
+    """
+    Sequential time-ordered folds over the FIXED rule set already in this file
+    -- no re-tuning between folds, that would just be slower-motion overfitting.
+    This checks something the single in-sample/out-of-sample split can't: is
+    performance reasonably consistent across different stretches of time, or
+    is any edge concentrated in one lucky period? Per Kaufman Ch.21, this is
+    diagnostic only -- if a fold looks bad, the answer is "note it," not
+    "adjust a threshold and rerun."
+    """
+    if not trades:
+        return
+    ordered = sorted(trades, key=lambda t: t["entry_ts"])
+    t_min, t_max = ordered[0]["entry_ts"], ordered[-1]["entry_ts"]
+    span = (t_max - t_min) / folds
+
+    print(f"\n  ==================================================================")
+    print(f"  WALK-FORWARD  ({folds} sequential time folds, fixed rule set)")
+    print(f"  ==================================================================")
+    print(f"  {'Fold':<24} {'Trades':>7} {'Win%':>7} {'PF':>6} {'Total%':>8}")
+    for i in range(folds):
+        fold_start = t_min + span * i
+        fold_end = t_min + span * (i + 1) if i < folds - 1 else t_max + pd.Timedelta(seconds=1)
+        group = [t for t in ordered if fold_start <= t["entry_ts"] < fold_end]
+        label = f"{fold_start.date()} -> {(fold_end - pd.Timedelta(seconds=1)).date()}"
+        s = _full_stats(group)
+        if not s:
+            print(f"  {label:<24} {'0':>7}")
+            continue
+        print(f"  {label:<24} {s['n']:>7} {s['win_rate']:>6.1f}% {s['profit_factor']:>6.2f} {s['total_pnl_pct']:>+7.2f}%")
+
+
+def _cached_symbols() -> list[str]:
+    """Every symbol with cached 5-min data -- grows automatically as more gets
+    fetched, instead of a hand-maintained list that silently goes stale."""
+    return sorted(p.name[: -len("_NSE_5m.parquet")] for p in DATA_DIR.glob("*_NSE_5m.parquet"))
+
 
 if __name__ == "__main__":
     args = sys.argv[1:]
-    default_syms = ["TORNTPHARM", "ADANIENT", "TRENT", "PIDILITIND", "EICHERMOT", "HAL",
-                     "BAJFINANCE", "APOLLOHOSP", "ICICIBANK", "FEDERALBNK", "BRITANNIA",
-                     "TECHM", "BHARTIARTL"]
-    syms = args or default_syms
+    syms = args or _cached_symbols()
 
     all_trades: list[dict] = []
     for sym in syms:
@@ -298,8 +480,19 @@ if __name__ == "__main__":
     RESULTS_DIR.mkdir(exist_ok=True)
     if all_trades:
         pd.DataFrame(all_trades).to_csv(RESULTS_DIR / "zone_backtest_trades.csv", index=False)
-        _print_full_stats(_full_stats(all_trades), "Combined (all symbols)")
+        _print_full_stats(_full_stats(all_trades), "Combined, ALL data (in-sample, already tuned against -- not a validation number)")
         _print_breakdown(all_trades)
+
+        is_trades = [t for t in all_trades if t["entry_ts"] < OOS_START]
+        oos_trades = [t for t in all_trades if t["entry_ts"] >= OOS_START]
+        print(f"\n  ==================================================================")
+        print(f"  IN-SAMPLE / OUT-OF-SAMPLE SPLIT  (cutoff {OOS_START.date()})")
+        print(f"  ==================================================================")
+        _print_full_stats(_full_stats(is_trades), f"In-sample (entry < {OOS_START.date()})")
+        _print_full_stats(_full_stats(oos_trades), f"Out-of-sample (entry >= {OOS_START.date()}) -- ONE-SHOT, do not re-tune off this")
+
+        _print_walkforward(all_trades, folds=4)
+
         print(f"\n  Saved -> {RESULTS_DIR / 'zone_backtest_trades.csv'}")
     else:
         print("\nNo trades across any symbol.")

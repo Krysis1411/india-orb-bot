@@ -25,6 +25,15 @@ import pandas as pd
 
 from strategies.zone_detector import Zone
 
+# Chart-review finding: UPL's touch-2 entry filled at 608.75 against a
+# 605.70-606.15 zone -- 0.4% away -- because the "reaction" bar was a single
+# 4.35-point-range spike (open 606.15, wicked down to 605.10 to touch the
+# zone, then closed at 608.75 in the same 5-min bar). A bar with a range this
+# far outside normal isn't a trustworthy rejection candle -- it's an
+# unreliable, effectively unfillable print, not a real orderly reaction.
+# Reject candidate reaction bars whose range blows past recent normal range.
+MAX_REACTION_RANGE_MULT = 3.0
+
 
 @dataclass
 class ReactionSignal:
@@ -123,10 +132,15 @@ def check_entry(
       - some bar must show a reaction candle (pattern) AND above-average
         volume TOGETHER on that same bar (this pairing stays coupled --
         a candle shape without volume behind it still isn't a real reaction)
-      - RSI must have been in exhaustion territory at some point in the
-        window (not necessarily the same bar as the reaction candle --
-        momentum exhaustion is a state that persists across a few bars,
-        it doesn't need to coincide exactly)
+      - RSI must STILL be in exhaustion territory on the entry bar itself
+        (the last bar in the window, where the trade actually fills) --
+        chart-review forensics found trades where the pattern+volume+touch
+        fired on an earlier bar but RSI had already unwound back toward
+        neutral by the time entry executed: those trades are a coin flip
+        (PF 0.42, n=8) vs trades where RSI is still exhausted right at entry
+        (PF 3.51, n=17) on the same 25-trade active set. Momentum needs to
+        still be stretched when you actually take the trade, not merely have
+        been stretched a bar or two ago.
 
     Entry executes at the CURRENT (last) bar's close once all three are
     satisfied -- not retroactively at whichever bar supplied the pattern.
@@ -152,17 +166,18 @@ def check_entry(
         return None
 
     rsi_series = rsi(bars_5m["close"], rsi_period)
-    window_rsi = rsi_series.iloc[-confirmation_window:]
+    entry_rsi = rsi_series.iloc[-1]
     if direction == "long":
-        if not (window_rsi <= rsi_oversold).any():
+        if not entry_rsi <= rsi_oversold:
             return None
     else:
-        if not (window_rsi >= rsi_overbought).any():
+        if not entry_rsi >= rsi_overbought:
             return None
 
     avg_vol = bars_5m["volume"].iloc[-(volume_lookback + confirmation_window):-confirmation_window].mean()
     if not avg_vol or avg_vol <= 0:
         return None
+    avg_range = (bars_5m["high"] - bars_5m["low"]).iloc[-(volume_lookback + confirmation_window):-confirmation_window].mean()
 
     # Scan the window most-recent-first for a bar with BOTH pattern and volume.
     pattern, reaction_vol_ratio = None, 0.0
@@ -171,6 +186,8 @@ def check_entry(
         cur, prev = bars_5m.iloc[i], bars_5m.iloc[i - 1]
         vol_ratio = float(cur["volume"] / avg_vol)
         if vol_ratio < reaction_min_volume_ratio:
+            continue
+        if avg_range and avg_range > 0 and (cur["high"] - cur["low"]) > MAX_REACTION_RANGE_MULT * avg_range:
             continue
         if direction == "long":
             if is_bullish_pin_bar(cur["open"], cur["high"], cur["low"], cur["close"]):
@@ -198,5 +215,5 @@ def check_entry(
     last = bars_5m.iloc[-1]
     return ReactionSignal(
         bars_5m.index[-1], direction, pattern, float(last["close"]),
-        float(window_rsi.iloc[-1]), reaction_vol_ratio,
+        float(entry_rsi), reaction_vol_ratio,
     )
