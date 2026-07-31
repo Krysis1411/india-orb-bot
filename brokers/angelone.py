@@ -17,7 +17,7 @@ The JWT session token is valid until midnight — no need to re-auth mid-day.
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -41,6 +41,14 @@ INTERVAL_1DAY = "ONE_DAY"
 _NIFTY50_FALLBACK_TOKEN = "99926000"
 _NIFTY50_SEARCH_TERM    = "Nifty 50"
 
+# Index spot tokens for NFO underlyings (NSE segment, AMXIDX instrument type).
+# These are the AngelOne-migrated 99926xxx tokens -- the older 26000/26009
+# tokens are deprecated. Verified against SmartAPI forum docs, 2026-07-31.
+INDEX_TOKENS = {
+    "NIFTY":     "99926000",
+    "BANKNIFTY": "99926009",
+}
+
 
 class AngelOneClient:
     """
@@ -60,6 +68,13 @@ class AngelOneClient:
         # Populated by _load_scrip_master() inside connect()
         # Maps base symbol (e.g. "RELIANCE") → token for NSE equity (-EQ) instruments
         self._scrip_master: dict[str, str] = {}
+        # Populated by _load_scrip_master() inside connect()
+        # Maps underlying name (e.g. "NIFTY") → list of NFO OPTIDX contract dicts:
+        # {token, symbol, expiry (date), strike (float, rupees), opt_type ("CE"/"PE"), lotsize}
+        self._option_chain: dict[str, list[dict]] = {}
+        # Populated by _load_scrip_master() inside connect()
+        # Maps underlying name → list of NFO FUTIDX contract dicts: {token, symbol, expiry, lotsize}
+        self._futures_chain: dict[str, list[dict]] = {}
 
     # ------------------------------------------------------------------
     # Auth
@@ -103,30 +118,170 @@ class AngelOneClient:
         "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
     )
 
+    # Underlyings we resolve NFO index-option contracts for. Kept narrow
+    # (rather than parsing every OPTSTK/OPTIDX row) since the full file has
+    # 100k+ rows and we only trade NIFTY/BANKNIFTY options for now.
+    _OPTION_UNDERLYINGS = ("NIFTY", "BANKNIFTY")
+
     def _load_scrip_master(self) -> dict[str, str]:
         """
-        Download the full instrument list and build {base_symbol: token} for
-        NSE equity instruments (exch_seg=nse_cm, symbol ending in -EQ).
-        One HTTP call at connect-time eliminates all searchScrip calls at startup.
+        Download the full instrument list ONCE and build:
+          1. {base_symbol: token} for NSE equity instruments (exch_seg="NSE",
+             symbol ending in -EQ) -- returned, stored as self._scrip_master.
+          2. self._option_chain: {underlying: [contract dicts]} for NFO
+             index-option rows (exch_seg="NFO", instrumenttype="OPTIDX",
+             name in NIFTY/BANKNIFTY) -- set as a side effect.
+
+        exch_seg is "NSE" (verified against the live file 2026-07-30, 2434
+        matching rows) -- NOT "nse_cm", which never matches any row and
+        silently produced an empty map, forcing every symbol through the
+        1/s-limited searchScrip fallback instead of this fast local lookup.
         """
         try:
             resp = requests.get(self._SCRIP_MASTER_URL, timeout=30)
             resp.raise_for_status()
             instruments = resp.json()
             out: dict[str, str] = {}
+            options: dict[str, list[dict]] = {u: [] for u in self._OPTION_UNDERLYINGS}
+            futures: dict[str, list[dict]] = {u: [] for u in self._OPTION_UNDERLYINGS}
             for item in instruments:
-                if item.get("exch_seg") != "nse_cm":
+                exch = item.get("exch_seg")
+                if exch == "NSE":
+                    sym = item.get("symbol", "")
+                    if sym.endswith("-EQ"):
+                        out[sym[:-3]] = str(item["token"])
                     continue
-                sym = item.get("symbol", "")
-                if not sym.endswith("-EQ"):
+                if exch != "NFO":
                     continue
-                base = sym[:-3]   # strip "-EQ"
-                out[base] = str(item["token"])
-            log.info(f"ScripMaster loaded — {len(out)} NSE equity tokens available locally")
+                itype = item.get("instrumenttype")
+                if itype == "OPTIDX":
+                    name = item.get("name", "")
+                    if name not in options:
+                        continue
+                    try:
+                        expiry = datetime.strptime(item["expiry"], "%d%b%Y").date()
+                        strike = float(item["strike"]) / 100.0
+                    except (KeyError, ValueError):
+                        continue
+                    sym = item.get("symbol", "")
+                    opt_type = "CE" if sym.endswith("CE") else "PE" if sym.endswith("PE") else None
+                    if opt_type is None:
+                        continue
+                    options[name].append({
+                        "token": str(item["token"]),
+                        "symbol": sym,
+                        "expiry": expiry,
+                        "strike": strike,
+                        "opt_type": opt_type,
+                        "lotsize": int(float(item.get("lotsize", 0))),
+                    })
+                elif itype == "FUTIDX":
+                    name = item.get("name", "")
+                    if name not in futures:
+                        continue
+                    try:
+                        expiry = datetime.strptime(item["expiry"], "%d%b%Y").date()
+                    except (KeyError, ValueError):
+                        continue
+                    futures[name].append({
+                        "token": str(item["token"]),
+                        "symbol": item.get("symbol", ""),
+                        "expiry": expiry,
+                        "lotsize": int(float(item.get("lotsize", 0))),
+                    })
+            self._option_chain = options
+            self._futures_chain = {u: sorted(v, key=lambda r: r["expiry"]) for u, v in futures.items()}
+            n_opts = sum(len(v) for v in options.values())
+            n_futs = sum(len(v) for v in futures.values())
+            log.info(
+                f"ScripMaster loaded — {len(out)} NSE equity tokens, "
+                f"{n_opts} NFO index-option contracts, {n_futs} NFO index-future contracts "
+                f"({', '.join(self._OPTION_UNDERLYINGS)})"
+            )
             return out
         except Exception as e:
             log.warning(f"ScripMaster load failed ({e}) — will fall back to searchScrip")
             return {}
+
+    # ------------------------------------------------------------------
+    # Index & option-chain resolution (NIFTY/BANKNIFTY index options)
+    # ------------------------------------------------------------------
+
+    def get_index_candles(
+        self,
+        underlying: str,
+        interval: str = INTERVAL_5MIN,
+    ) -> pd.DataFrame | None:
+        """Today's OHLCV bars for the NIFTY/BANKNIFTY spot index (NSE segment)."""
+        token = INDEX_TOKENS.get(underlying)
+        if token is None:
+            log.error(f"No index token configured for {underlying}")
+            return None
+        return self.get_today_candles(underlying, token, exchange="NSE", interval=interval)
+
+    def get_option_expiries(self, underlying: str) -> list[date]:
+        """Sorted list of distinct expiry dates currently listed for underlying."""
+        rows = self._option_chain.get(underlying, [])
+        return sorted({r["expiry"] for r in rows})
+
+    def get_option_lot_size(self, underlying: str) -> int | None:
+        """Current NFO lot size for underlying, read live from ScripMaster (not hardcoded --
+        NSE revises lot sizes every few months by circular)."""
+        rows = self._option_chain.get(underlying, [])
+        return rows[0]["lotsize"] if rows else None
+
+    def get_strike_interval(self, underlying: str, expiry: date) -> float | None:
+        """Infer the strike spacing for a given expiry from the actual listed strikes
+        (not hardcoded -- NSE has changed strike schemes multiple times, e.g. the
+        Nov 2025 monthly-strike-interval revision)."""
+        strikes = sorted({r["strike"] for r in self._option_chain.get(underlying, []) if r["expiry"] == expiry})
+        if len(strikes) < 2:
+            return None
+        diffs = [round(b - a, 2) for a, b in zip(strikes, strikes[1:])]
+        return min(diffs)
+
+    def pick_strike(
+        self,
+        underlying: str,
+        expiry: date,
+        spot: float,
+        offset_steps: int = 0,
+    ) -> float | None:
+        """
+        Return the strike nearest to `spot`, offset by `offset_steps` strike
+        intervals (positive = further OTM for calls / further ITM for puts,
+        i.e. higher strikes; negative = lower strikes).
+        offset_steps=0 → ATM.
+        """
+        strikes = sorted({r["strike"] for r in self._option_chain.get(underlying, []) if r["expiry"] == expiry})
+        if not strikes:
+            return None
+        atm = min(strikes, key=lambda s: abs(s - spot))
+        idx = strikes.index(atm) + offset_steps
+        idx = max(0, min(idx, len(strikes) - 1))
+        return strikes[idx]
+
+    def get_near_month_future(self, underlying: str) -> dict | None:
+        """Return the nearest-expiry NFO futures contract dict for underlying,
+        or None. Used as a real-volume proxy for the spot index, which itself
+        always reports zero traded volume (it's a computed value, not a
+        traded instrument -- only its futures/options are)."""
+        rows = self._futures_chain.get(underlying, [])
+        return rows[0] if rows else None
+
+    def resolve_option(
+        self,
+        underlying: str,
+        expiry: date,
+        strike: float,
+        opt_type: str,
+    ) -> dict | None:
+        """Return the contract dict (token, symbol, lotsize, ...) for an exact
+        underlying/expiry/strike/CE-or-PE combination, or None if not listed."""
+        for r in self._option_chain.get(underlying, []):
+            if r["expiry"] == expiry and abs(r["strike"] - strike) < 0.01 and r["opt_type"] == opt_type.upper():
+                return r
+        return None
 
     def get_nse_intraday_symbols(self) -> set[str]:
         """
@@ -222,10 +377,13 @@ class AngelOneClient:
     # ------------------------------------------------------------------
 
     def get_ltp(self, symbol: str, token: str, exchange: str = "NSE") -> float | None:
-        """Last Traded Price (real-time)."""
+        """Last Traded Price (real-time). `symbol` should be the exact tradingsymbol
+        for non-NSE exchanges (e.g. an NFO option's "NIFTY30JUL26240000CE") --
+        only NSE equity symbols get the "-EQ" suffix auto-appended."""
         self._ensure_connected()
+        tradingsymbol = self._eq_symbol(symbol) if exchange == "NSE" else symbol
         try:
-            resp = self._obj.ltpData(exchange, self._eq_symbol(symbol), token)
+            resp = self._obj.ltpData(exchange, tradingsymbol, token)
             return float(resp["data"]["ltp"])
         except Exception as e:
             log.error(f"{symbol}: LTP fetch failed — {e}")
@@ -237,10 +395,22 @@ class AngelOneClient:
         token: str,
         exchange: str = "NSE",
         interval: str = INTERVAL_5MIN,
+        max_retries: int = 2,
     ) -> pd.DataFrame | None:
         """
         Fetch all 5-min OHLCV bars for today's NSE session (9:15 AM → now).
         Returns a DataFrame indexed by IST datetime or None on failure.
+
+        Retries on "exceeding access rate" errors: AngelOne's documented
+        limit for this endpoint is 3 req/s, 180/min, 5000/hour (per their
+        SmartAPI forum, "Changes in API Rate Limit"), and our callers pace
+        well under that (~1/s) -- yet a live run against 62 symbols got
+        rejected on every single call. That matches a separately-documented,
+        AngelOne-acknowledged issue ("API Rate Limit checks are not perfect"
+        on the SmartAPI forum): users get blocked well below the documented
+        limits, i.e. a real flakiness/false-positive in AngelOne's own
+        enforcement, not something pacing alone fixes. A short retry
+        recovers a meaningful fraction of these transient false rejections.
         """
         self._ensure_connected()
         today = datetime.now(IST).date()
@@ -254,20 +424,27 @@ class AngelOneClient:
             "fromdate": from_str,
             "todate": to_str,
         }
-        try:
-            resp = self._obj.getCandleData(params)
-            rows = resp.get("data") or []
-            if not rows:
-                return None
-            df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
-            df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_convert(IST)
-            df = df.set_index("timestamp")
-            df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
-            df["volume"] = df["volume"].astype(int)
-            return df if not df.empty else None
-        except Exception as e:
-            log.error(f"{symbol}: candle fetch failed — {e}")
-            return None
+        last_err: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                resp = self._obj.getCandleData(params)
+                rows = resp.get("data") or []
+                if not rows:
+                    return None
+                df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_convert(IST)
+                df = df.set_index("timestamp")
+                df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
+                df["volume"] = df["volume"].astype(int)
+                return df if not df.empty else None
+            except Exception as e:
+                last_err = e
+                if attempt < max_retries and "exceeding access rate" in str(e).lower():
+                    time.sleep(2.0 * (attempt + 1))   # 2s, then 4s
+                    continue
+                break
+        log.error(f"{symbol}: candle fetch failed — {last_err}")
+        return None
 
     def get_nifty_trend(self) -> tuple[bool | None, float]:
         """
