@@ -1,0 +1,11 @@
+[Unit]
+Description=Start Index Options Paper Trader every weekday before market open
+
+[Timer]
+# Same rationale as zone-paper-bot.timer -- daily restart for a fresh
+# AngelOne session, not just crash recovery.
+OnCalendar=Mon..Fri 08:50:00
+Persistent=false
+
+[Install]
+WantedBy=timers.target

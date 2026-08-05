@@ -1,0 +1,14 @@
+[Unit]
+Description=Start Zone Paper Trader every weekday before market open
+
+[Timer]
+# Server timezone is Asia/Kolkata (set by setup_vps.sh) -- 08:50 IST, 25 min
+# before NSE open (09:15). The bot exits cleanly at market close each day
+# (state persists to logs/zone_paper_state.json) specifically so this daily
+# restart gets a fresh AngelOne session -- the JWT expires at midnight and
+# the process never re-authenticates mid-run.
+OnCalendar=Mon..Fri 08:50:00
+Persistent=false
+
+[Install]
+WantedBy=timers.target
