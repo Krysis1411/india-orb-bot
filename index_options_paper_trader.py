@@ -491,7 +491,17 @@ if __name__ == "__main__":
     log.info(f"Loop mode — checking every {args.interval // 60}m during market hours (09:15-15:30 IST)")
     while True:
         current_t = _now_ist().time()
-        if current_t < MARKET_OPEN_IST or current_t >= MARKET_CLOSE_IST:
+        if current_t >= MARKET_CLOSE_IST:
+            # Exit cleanly at close rather than sleep through the night --
+            # AngelOne's JWT session token expires at midnight and this
+            # process never re-authenticates, so surviving past midnight
+            # just means every call fails until someone notices. State
+            # persists to STATE_FILE, so a clean daily exit is safe --
+            # systemd's daily timer restarts the process fresh (new
+            # connect(), new JWT) before the next session's market open.
+            log.info("Market closed for the day — exiting cleanly (daily systemd timer restarts before next open)")
+            raise SystemExit(0)
+        if current_t < MARKET_OPEN_IST:
             log.info(f"Outside market hours ({current_t.strftime('%H:%M')} IST) — sleeping {args.interval // 60}m")
             _time.sleep(args.interval)
             continue

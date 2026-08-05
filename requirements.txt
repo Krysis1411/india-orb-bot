@@ -14,3 +14,7 @@ websocket-client>=1.6.0
 ta>=0.11.0
 jugaad-data>=0.26
 quantstats-lumi>=0.3.3
+
+# Options pricing (ml/gbs.py -- imported by index_options_paper_trader.py at runtime)
+scipy>=1.11.0
+numpy>=1.26.0
