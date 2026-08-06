@@ -465,7 +465,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="NIFTY/BANKNIFTY index options paper trader — AngelOne SmartAPI, no real orders")
     parser.add_argument("--once", action="store_true", help="Run a single cycle and exit (testing)")
-    parser.add_argument("--interval", type=int, default=300, metavar="SECONDS", help="Loop interval (default 300 = 5 min)")
+    parser.add_argument("--interval", type=int, default=900, metavar="SECONDS", help="Loop interval (default 900 = 15 min -- 5 min was triggering AngelOne rate-limit errors most cycles)")
     args = parser.parse_args()
 
     log.info("*** INDEX OPTIONS PAPER TRADING — no real orders will ever be placed by this script ***")

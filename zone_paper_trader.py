@@ -38,7 +38,7 @@ Usage
 -----
     python zone_paper_trader.py              # loop every 5 min during market hours
     python zone_paper_trader.py --once       # single cycle and exit (testing)
-    python zone_paper_trader.py --interval 300
+    python zone_paper_trader.py --interval 900
 """
 from __future__ import annotations
 
@@ -490,7 +490,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Zone strategy paper trader — AngelOne SmartAPI, no real orders")
     parser.add_argument("--once", action="store_true", help="Run a single cycle and exit (testing)")
-    parser.add_argument("--interval", type=int, default=300, metavar="SECONDS", help="Loop interval (default 300 = 5 min)")
+    parser.add_argument("--interval", type=int, default=900, metavar="SECONDS", help="Loop interval (default 900 = 15 min -- 5 min was triggering AngelOne rate-limit errors on nearly every cycle across 62 symbols)")
     args = parser.parse_args()
 
     log.info("*** PAPER TRADING — no real orders will ever be placed by this script ***")
