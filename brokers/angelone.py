@@ -17,6 +17,7 @@ The JWT session token is valid until midnight — no need to re-auth mid-day.
 import logging
 import os
 import time
+from collections import defaultdict
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -118,9 +119,10 @@ class AngelOneClient:
         "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
     )
 
-    # Underlyings we resolve NFO index-option contracts for. Kept narrow
-    # (rather than parsing every OPTSTK/OPTIDX row) since the full file has
-    # 100k+ rows and we only trade NIFTY/BANKNIFTY options for now.
+    # Index underlyings we resolve NFO futures for (used only as a volume
+    # proxy -- see get_near_month_future). Kept narrow on purpose: FUTIDX
+    # only exists for indices, stocks already have real traded volume on
+    # their own equity bars so they never need this.
     _OPTION_UNDERLYINGS = ("NIFTY", "BANKNIFTY")
 
     def _load_scrip_master(self) -> dict[str, str]:
@@ -129,8 +131,14 @@ class AngelOneClient:
           1. {base_symbol: token} for NSE equity instruments (exch_seg="NSE",
              symbol ending in -EQ) -- returned, stored as self._scrip_master.
           2. self._option_chain: {underlying: [contract dicts]} for NFO
-             index-option rows (exch_seg="NFO", instrumenttype="OPTIDX",
-             name in NIFTY/BANKNIFTY) -- set as a side effect.
+             option rows -- OPTIDX (index options, NIFTY/BANKNIFTY only) AND
+             OPTSTK (single-stock options, ANY name with listed contracts --
+             ~180 F&O-enabled stocks, verified live 2026-08-07: same
+             monthly/last-Tuesday expiry convention as BANKNIFTY, American
+             exercise). Unlike the index case, no name whitelist is applied
+             for OPTSTK -- the file only has entries for names that actually
+             have listed options, so there's nothing to filter.
+          3. self._futures_chain: FUTIDX only (index volume-proxy futures).
 
         exch_seg is "NSE" (verified against the live file 2026-07-30, 2434
         matching rows) -- NOT "nse_cm", which never matches any row and
@@ -142,7 +150,7 @@ class AngelOneClient:
             resp.raise_for_status()
             instruments = resp.json()
             out: dict[str, str] = {}
-            options: dict[str, list[dict]] = {u: [] for u in self._OPTION_UNDERLYINGS}
+            options: dict[str, list[dict]] = defaultdict(list)
             futures: dict[str, list[dict]] = {u: [] for u in self._OPTION_UNDERLYINGS}
             for item in instruments:
                 exch = item.get("exch_seg")
@@ -154,9 +162,9 @@ class AngelOneClient:
                 if exch != "NFO":
                     continue
                 itype = item.get("instrumenttype")
-                if itype == "OPTIDX":
+                if itype in ("OPTIDX", "OPTSTK"):
                     name = item.get("name", "")
-                    if name not in options:
+                    if not name:
                         continue
                     try:
                         expiry = datetime.strptime(item["expiry"], "%d%b%Y").date()
@@ -189,14 +197,15 @@ class AngelOneClient:
                         "expiry": expiry,
                         "lotsize": int(float(item.get("lotsize", 0))),
                     })
-            self._option_chain = options
+            self._option_chain = dict(options)
             self._futures_chain = {u: sorted(v, key=lambda r: r["expiry"]) for u, v in futures.items()}
             n_opts = sum(len(v) for v in options.values())
             n_futs = sum(len(v) for v in futures.values())
+            n_stocks_with_options = sum(1 for k in options if k not in self._OPTION_UNDERLYINGS)
             log.info(
                 f"ScripMaster loaded — {len(out)} NSE equity tokens, "
-                f"{n_opts} NFO index-option contracts, {n_futs} NFO index-future contracts "
-                f"({', '.join(self._OPTION_UNDERLYINGS)})"
+                f"{n_opts} NFO option contracts across {n_stocks_with_options} stocks + "
+                f"{', '.join(self._OPTION_UNDERLYINGS)}, {n_futs} NFO index-future contracts"
             )
             return out
         except Exception as e:
@@ -204,7 +213,10 @@ class AngelOneClient:
             return {}
 
     # ------------------------------------------------------------------
-    # Index & option-chain resolution (NIFTY/BANKNIFTY index options)
+    # Index & option-chain resolution -- get_index_candles/get_near_month_future
+    # are index-only (NIFTY/BANKNIFTY); get_option_expiries/get_option_lot_size/
+    # get_strike_interval/pick_strike/resolve_option work for ANY underlying
+    # with listed NFO options, index or single-stock alike.
     # ------------------------------------------------------------------
 
     def get_index_candles(

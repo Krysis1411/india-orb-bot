@@ -21,6 +21,18 @@ Unlike the ORB bot, this is a SWING strategy (positions can span multiple
 days), so there is no end-of-day square-off — positions carry over between
 runs via the persisted state file.
 
+Every equity signal ALSO gets a shadow options overlay: a real, listed
+single-stock option (long CE for a demand/long signal, long PE for supply/
+short) resolved and paper-traded against its own real live LTP, logged
+separately to zone_options_paper_trades.csv. This exists specifically to
+widen the strategy's trade-frequency bottleneck -- the equity bot alone was
+producing very few real signals even pooled across 77 symbols, and options
+give the exact same rare signals a second, leveraged outlet without touching
+any of the zone-quality filters that produce them. Costs zero extra
+candle-fetch API calls (reuses the bars already fetched for the equity
+signal) -- only the incremental option-chain lookup + LTP fetch on an actual
+signal, which is rare by construction.
+
 Data flow per cycle:
   1. Pull today's 5-min and 1-hour bars via AngelOne REST (getCandleData),
      merged onto a warm-started historical base (backtest/data/*.parquet)
@@ -46,7 +58,7 @@ import json
 import logging
 import time as _time
 from dataclasses import asdict, dataclass
-from datetime import datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -69,6 +81,7 @@ DATA_DIR = REPO_ROOT / "backtest" / "data"
 LOG_DIR = REPO_ROOT / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 TRADES_CSV = LOG_DIR / "zone_paper_trades.csv"
+OPTIONS_TRADES_CSV = LOG_DIR / "zone_options_paper_trades.csv"
 STATE_FILE = LOG_DIR / "zone_paper_state.json"
 
 # ---------------------------------------------------------------------------
@@ -113,6 +126,58 @@ MIN_RISK_ATR_MULT = 1.0
 STOP_BUFFER_PCT = 0.002
 TARGET_RR = 2.0
 MAX_HOLD_BARS = 1500  # backstop only, same as backtest -- not the primary exit
+
+# ---------------------------------------------------------------------------
+# Options overlay -- on every equity zone signal, ALSO resolve and paper-trade
+# a real single-stock option (long CE for a demand/long signal, long PE for a
+# supply/short one). Reuses the exact same bars/zones/signal already computed
+# above -- zero extra candle-fetch API calls, only the incremental option-
+# chain lookup + LTP fetch on an actual signal (rare, not per-cycle). Verified
+# live 2026-08-07: NSE single-stock options are monthly-only, last Tuesday of
+# the month (same convention as BANKNIFTY), American exercise. The equity
+# position's stop/target/trailing logic (unchanged) still decides WHEN to
+# exit; only the option's own real LTP is used for the option's P&L.
+# ---------------------------------------------------------------------------
+MIN_DTE_DAYS = 2  # avoid resolving a same-day/next-day 0DTE-style contract
+
+
+def _next_monthly_expiry(d: date) -> date:
+    """Last Tuesday of d's month; if already past, last Tuesday of next month."""
+    def last_tuesday_of(year: int, month: int) -> date:
+        first_of_next = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+        last_day = first_of_next - timedelta(days=1)
+        offset = (last_day.weekday() - 1) % 7
+        return last_day - timedelta(days=offset)
+
+    candidate = last_tuesday_of(d.year, d.month)
+    if candidate >= d:
+        return candidate
+    nm_year, nm_month = (d.year, d.month + 1) if d.month < 12 else (d.year + 1, 1)
+    return last_tuesday_of(nm_year, nm_month)
+
+
+def _pick_stock_expiry(entry_date: date) -> date:
+    floor_date = entry_date + timedelta(days=MIN_DTE_DAYS)
+    expiry = _next_monthly_expiry(entry_date)
+    while expiry < floor_date:
+        expiry = _next_monthly_expiry(expiry + timedelta(days=1))
+    return expiry
+
+
+@dataclass
+class OptionPosition:
+    symbol: str                # underlying stock symbol
+    direction: str              # "long" | "short" -- of the underlying zone signal
+    pattern: str
+    zone_key: str                # ties back to the equity OpenPosition for the same zone
+    entry_ts: str
+    option_type: str            # "CE" | "PE"
+    option_symbol: str
+    option_token: str
+    strike: float
+    expiry: str                  # ISO date
+    entry_option_price: float    # real LTP at entry
+    touch_number: int
 
 
 @dataclass
@@ -192,6 +257,7 @@ class ZonePaperTrader:
         self.client = client
         self.states: dict[str, SymbolState] = {}
         self.open_positions: list[OpenPosition] = []
+        self.open_option_positions: list[OptionPosition] = []
 
     # ------------------------------------------------------------------
     # Setup
@@ -218,6 +284,7 @@ class ZonePaperTrader:
             log.warning(f"Could not load state file ({e}) -- starting fresh")
             return
         self.open_positions = [OpenPosition(**p) for p in raw.get("open_positions", [])]
+        self.open_option_positions = [OptionPosition(**p) for p in raw.get("open_option_positions", [])]
         for sym, touch_state in raw.get("zone_touch_state", {}).items():
             if sym in self.states:
                 self.states[sym].zone_touch_state = {
@@ -231,6 +298,7 @@ class ZonePaperTrader:
     def save_state(self) -> None:
         payload = {
             "open_positions": [asdict(p) for p in self.open_positions],
+            "open_option_positions": [asdict(p) for p in self.open_option_positions],
             "zone_touch_state": {
                 sym: {k: list(v) for k, v in st.zone_touch_state.items()}
                 for sym, st in self.states.items()
@@ -358,6 +426,71 @@ class ZonePaperTrader:
                 f"| touch #{zone.touches} | zone {zone.price_low:.2f}-{zone.price_high:.2f}"
             )
 
+            self._open_option_position(state, zone, key, is_long, entry_price, five.index[-1], zone.touches)
+
+    def _open_option_position(
+        self, state: SymbolState, zone: Zone, zone_key: str, is_long: bool,
+        entry_price: float, entry_ts: pd.Timestamp, touch_number: int,
+    ) -> None:
+        """Resolve a real, listed single-stock option for this signal and
+        record its real live LTP as the entry price. Best-effort: a symbol
+        with no listed options, or a failed LTP fetch, just means no options
+        overlay for this particular signal -- the equity paper trade above
+        is entirely unaffected either way."""
+        option_type = "CE" if is_long else "PE"
+        entry_date = entry_ts.tz_convert(IST).date()
+        expiry = _pick_stock_expiry(entry_date)
+        interval = self.client.get_strike_interval(state.symbol, expiry)
+        if interval is None:
+            return  # no listed options for this stock/expiry
+        strike = self.client.pick_strike(state.symbol, expiry, entry_price, offset_steps=0)
+        if strike is None:
+            return
+        contract = self.client.resolve_option(state.symbol, expiry, strike, option_type)
+        if contract is None:
+            log.warning(f"{state.symbol}: no listed {option_type} at strike {strike} exp {expiry} -- options overlay skipped")
+            return
+        opt_ltp = self.client.get_ltp(contract["symbol"], contract["token"], exchange="NFO")
+        if opt_ltp is None or opt_ltp <= 0:
+            log.warning(f"{state.symbol}: LTP fetch failed for {contract['symbol']} -- options overlay skipped")
+            return
+
+        opt_pos = OptionPosition(
+            symbol=state.symbol, direction="long" if is_long else "short",
+            pattern=zone.pattern, zone_key=zone_key, entry_ts=entry_ts.isoformat(),
+            option_type=option_type, option_symbol=contract["symbol"], option_token=contract["token"],
+            strike=strike, expiry=expiry.isoformat(), entry_option_price=round(opt_ltp, 2),
+            touch_number=touch_number,
+        )
+        self.open_option_positions.append(opt_pos)
+        log.info(f"PAPER ENTRY (option) — {state.symbol} BUY {contract['symbol']} @ {opt_ltp:.2f}")
+
+    def _close_option_position(self, opt_pos: OptionPosition, exit_reason: str, exit_ts: pd.Timestamp) -> None:
+        opt_ltp = self.client.get_ltp(opt_pos.option_symbol, opt_pos.option_token, exchange="NFO")
+        if opt_ltp is None:
+            # Real quote unavailable (e.g. contract already expired/delisted) --
+            # settle at intrinsic value against the current underlying price
+            # rather than dropping the trade from the log.
+            state = self.states.get(opt_pos.symbol)
+            spot = float(state.bars_5m.iloc[-1]["close"]) if state is not None and not state.bars_5m.empty else opt_pos.strike
+            log.warning(f"{opt_pos.option_symbol}: LTP unavailable at exit -- settling at intrinsic value")
+            opt_ltp = max(spot - opt_pos.strike, 0.0) if opt_pos.option_type == "CE" else max(opt_pos.strike - spot, 0.0)
+
+        pnl_pct = (opt_ltp - opt_pos.entry_option_price) / opt_pos.entry_option_price * 100
+        log.info(
+            f"PAPER EXIT (option) — {opt_pos.symbol} {opt_pos.option_symbol} @ {opt_ltp:.2f} "
+            f"({exit_reason}) | pnl {pnl_pct:+.2f}%"
+        )
+        row = {
+            "symbol": opt_pos.symbol, "direction": opt_pos.direction, "pattern": opt_pos.pattern,
+            "option_symbol": opt_pos.option_symbol, "option_type": opt_pos.option_type,
+            "strike": opt_pos.strike, "expiry": opt_pos.expiry, "touch_number": opt_pos.touch_number,
+            "entry_ts": opt_pos.entry_ts, "entry_option_price": opt_pos.entry_option_price,
+            "exit_ts": exit_ts.isoformat(), "exit_option_price": round(opt_ltp, 2),
+            "exit_reason": exit_reason, "pnl_pct": round(pnl_pct, 2),
+        }
+        _append_option_trade_row(row)
+
     # ------------------------------------------------------------------
     # Exits -- same stop/trailing-stop/target/zero-volume logic as
     # zone_backtest.py's exit loop, evaluated one new bar at a time.
@@ -401,6 +534,10 @@ class ZonePaperTrader:
 
             if exit_price is not None:
                 self._close_position(pos, exit_price, exit_reason, state.bars_5m.index[-1])
+                matching_opt = next((o for o in self.open_option_positions if o.zone_key == pos.zone_key), None)
+                if matching_opt is not None:
+                    self._close_option_position(matching_opt, exit_reason, state.bars_5m.index[-1])
+                    self.open_option_positions = [o for o in self.open_option_positions if o is not matching_opt]
                 continue
 
             # Trailing-stop update from this bar's excursion -- takes effect
@@ -444,6 +581,20 @@ class ZonePaperTrader:
         if state is not None:
             state.zone_has_open_position[pos.zone_key] = False
 
+    def _check_option_expiries(self) -> None:
+        """Force-close any option position whose own contract has expired --
+        the equity swing position it's shadowing can run far longer than a
+        single monthly options contract, so this is checked independently of
+        the equity position's own stop/target/trailing status."""
+        today = _now_ist().date()
+        still_open = []
+        for opt_pos in self.open_option_positions:
+            if today >= date.fromisoformat(opt_pos.expiry):
+                self._close_option_position(opt_pos, "contract_expiry", _now_ist())
+            else:
+                still_open.append(opt_pos)
+        self.open_option_positions = still_open
+
     # ------------------------------------------------------------------
     # Main cycle
     # ------------------------------------------------------------------
@@ -470,15 +621,25 @@ class ZonePaperTrader:
             self._refresh_zones(state)
             self._check_new_entries(state)
             self._check_exits(state)
+        self._check_option_expiries()
         self.save_state()
         positions_desc = ", ".join(f"{p.symbol} {p.direction}" for p in self.open_positions) or "none"
-        log.info(f"Cycle complete — {len(self.open_positions)} open position(s): {positions_desc}")
+        log.info(
+            f"Cycle complete — {len(self.open_positions)} open equity position(s): {positions_desc} "
+            f"| {len(self.open_option_positions)} open option position(s)"
+        )
 
 
 def _append_trade_row(row: dict) -> None:
     df = pd.DataFrame([row])
     write_header = not TRADES_CSV.exists()
     df.to_csv(TRADES_CSV, mode="a", header=write_header, index=False)
+
+
+def _append_option_trade_row(row: dict) -> None:
+    df = pd.DataFrame([row])
+    write_header = not OPTIONS_TRADES_CSV.exists()
+    df.to_csv(OPTIONS_TRADES_CSV, mode="a", header=write_header, index=False)
 
 
 def _now_ist() -> datetime:
