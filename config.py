@@ -151,4 +151,37 @@ ZONE_SYMBOLS = [
     "ADANIPORTS", "SBILIFE", "M&M", "UPL", "SHREECEM",
     "TATAPOWER", "NAUKRI", "GAIL", "IOC", "AMBUJACEM", "LUPIN",
     "AUROPHARMA", "COLPAL", "DLF",
+    # Full expansion to the live NFO F&O-eligible universe (verified via
+    # ScripMaster, 2026-08-07 -- 208 stocks with listed options, itself
+    # NSE/SEBI's own liquidity screen for F&O eligibility) minus symbols
+    # already covered above. More instruments scanned in parallel means more
+    # chances for a genuinely rare reversal zone to form -- added specifically
+    # because the zone-quality filters themselves were NOT the trade-frequency
+    # bottleneck (loosening those was tested and made results worse); a
+    # 77-symbol universe simply wasn't enough surface area. Some of these are
+    # recent IPOs with thin history (e.g. SWIGGY, PREMIERENE, WAAREEENER) --
+    # left in rather than pre-filtered, since fetch_nse_data_smartapi.py /
+    # fetch_nse_multi_tf.py already tolerate individual fetch failures (same
+    # pattern as TATAMOTORS/LTIM being silently excluded above).
+    "360ONE", "ABCAPITAL", "ADANIENSOL", "ADANIGREEN", "ADANIPOWER", "ALKEM",
+    "AMBER", "ANGELONE", "APLAPOLLO", "ASHOKLEY", "ASTRAL", "AUBANK",
+    "BAJAJHLDNG", "BANKINDIA", "BDL", "BHARATFORG", "BHEL", "BIOCON",
+    "BLUESTARCO", "BOSCHLTD", "BSE", "CAMS", "CANBK", "CDSL", "CGPOWER",
+    "COCHINSHIP", "COFORGE", "CONCOR", "CROMPTON", "CUMMINSIND", "DALBHARAT",
+    "DELHIVERY", "DIXON", "DMART", "ETERNAL", "FORCEMOT", "FORTIS", "GLENMARK",
+    "GMRAIRPORT", "GODFRYPHLP", "GODREJPROP", "GVT&D", "HDFCAMC", "HINDPETRO",
+    "HINDZINC", "HYUNDAI", "ICICIGI", "ICICIPRULI", "IDEA", "IEX", "INDHOTEL",
+    "INDIANB", "INDIGO", "INDUSTOWER", "INOXWIND", "IREDA", "IRFC",
+    "JINDALSTEL", "JIOFIN", "JSWENERGY", "JUBLFOOD", "KALYANKJIL", "KAYNES",
+    "KEI", "KFINTECH", "KPITTECH", "LAURUSLABS", "LICHSGFIN", "LICI", "LODHA",
+    "LTF", "LTM", "MANAPPURAM", "MANKIND", "MAXHEALTH", "MAZDOCK", "MCX",
+    "MFSL", "MOTHERSON", "MOTILALOFS", "MPHASIS", "NAM-INDIA", "NATIONALUM",
+    "NBCC", "NHPC", "NMDC", "NYKAA", "OBEROIRLTY", "OFSS", "OIL", "PAGEIND",
+    "PATANJALI", "PAYTM", "PERSISTENT", "PETRONET", "PFC", "PGEL",
+    "PHOENIXLTD", "PIIND", "PNB", "PNBHOUSING", "POLICYBZR", "POLYCAB",
+    "POWERINDIA", "PREMIERENE", "PRESTIGE", "RADICO", "RBLBANK", "RECLTD",
+    "RVNL", "SAIL", "SBICARD", "SHRIRAMFIN", "SOLARINDS", "SONACOMS", "SRF",
+    "SUPREMEIND", "SUZLON", "SWIGGY", "TATAELXSI", "TIINDIA", "TMPV",
+    "UNIONBANK", "UNITDSPR", "UNOMINDA", "VBL", "VMM", "VOLTAS", "WAAREEENER",
+    "YESBANK", "ZYDUSLIFE",
 ]

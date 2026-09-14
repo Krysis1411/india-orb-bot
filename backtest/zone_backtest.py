@@ -88,6 +88,67 @@ TRAIL_PROFIT_PCT = 0.5       # once past breakeven, protect this fraction of pea
 # already lost before the first bar closes.
 MIN_RISK_ATR_MULT = 1.0
 
+# ---------------------------------------------------------------------------
+# Transaction costs -- previously NOT modeled at all (pnl_pct was raw
+# price-to-price movement). At the ~0.2-1.2% per-trade P&L this strategy
+# produces, real NSE costs are not a rounding error: a 42%-win-rate, PF-0.99
+# run (19 trades, 2026-08-13) is gross -- net of realistic costs it's a loser.
+# Modeled as round-trip PERCENTAGES of trade value rather than flat per-order
+# fees, since trades here have no fixed position size (unlike the ORB bot's
+# INDIA_POSITION_SIZE_INR) to convert a flat rupee fee into a %.
+#
+# This is a swing strategy (positions can span days) -> equity delivery
+# (CNC) product, not intraday (MIS). Current standard NSE/SEBI/broker
+# delivery rates, summed both legs:
+#   STT                 0.1% EACH side for delivery (vs. 0.025% sell-only
+#                       for intraday) -- the single biggest line item
+#   Exchange txn charge ~0.00297% (NSE) each side
+#   SEBI turnover fee   ~0.0001% each side
+#   Stamp duty          0.015% (buy side only, SEBI-mandated state-duty cap)
+#   GST                 18% on (brokerage + exchange txn charge)
+#   Brokerage           ~₹0 on AngelOne's current zero-brokerage-on-delivery
+#                       plan -- excluded (would need a fixed trade notional
+#                       to express as a %, and rounds to ~0 anyway)
+# Sums to ~0.115% entry + ~0.100% exit ~= 0.22% round trip. Not claiming
+# paisa-level tax precision -- the point is *some* realistic drag exists,
+# not zero. Update if AngelOne's fee schedule or STT rates change.
+ROUND_TRIP_COST_PCT = 0.22
+
+# Slippage: the backtest fills entries/exits at an exact theoretical price
+# (the reaction bar's close; the stop/target level itself). Real fills don't
+# work that way:
+#   - Entry executes once check_entry() confirms on the current bar's CLOSE
+#     -- by the time an order could actually reach the exchange, price has
+#     moved on to the next tick. Market-order-like slippage, both directions.
+#   - take_profit is a resting limit order at the target price -- fills AT or
+#     BETTER than that price by construction. No adverse slippage modeled.
+#   - stop_loss / trailing_stop / max_hold all become market orders once
+#     triggered (a stop-loss is never a limit order in practice, and a
+#     max_hold forced exit is a discretionary market close) -- these can gap
+#     through the intended level in a fast market, so slippage is worse here
+#     than on entry.
+# Applied unfavorably (against the position) in all cases -- this is a cost
+# model, not a two-sided noise simulation.
+SLIPPAGE_ENTRY_PCT = 0.03
+SLIPPAGE_STOP_PCT = 0.05     # stop_loss, trailing_stop, max_hold (all market-order exits)
+SLIPPAGE_TARGET_PCT = 0.0    # take_profit -- passive limit order, no adverse slippage
+
+
+def _apply_trade_costs(entry_price: float, exit_price: float, is_long: bool, exit_reason: str) -> tuple[float, float]:
+    """Adjust entry/exit price for slippage (favorable-direction-only cost,
+    per exit_reason), returning (adjusted_entry, adjusted_exit). Round-trip
+    brokerage/tax costs are netted separately in pnl_pct since they're not a
+    price-level phenomenon."""
+    entry_slip = entry_price * (SLIPPAGE_ENTRY_PCT / 100)
+    exit_slip_pct = SLIPPAGE_TARGET_PCT if exit_reason == "take_profit" else SLIPPAGE_STOP_PCT
+    exit_slip = exit_price * (exit_slip_pct / 100)
+    if is_long:
+        # Buy-to-enter fills slightly higher, sell-to-exit fills slightly lower.
+        return entry_price + entry_slip, exit_price - exit_slip
+    # Short-sell-to-enter fills slightly lower, buy-to-cover fills slightly higher.
+    return entry_price - entry_slip, exit_price + exit_slip
+
+
 # Every rule/parameter in this file (legin thresholds, confirmation_window,
 # MAX_TOUCHES, the trailing-stop constants above, ...) has so far been tuned by
 # repeatedly re-running against the full cached dataset -- exactly the
@@ -151,7 +212,26 @@ def run_symbol(
     hourly_idx: pd.DatetimeIndex | None = None
     if h_path.exists():
         hourly = load_bars_df(h_path)
-        h_zones = [z for z in find_zones(hourly, timeframe="1h") if z.is_reversal]
+        # enforce_gap_filter=False here is deliberate, NOT an oversight -- found
+        # by instrumenting find_zones() after noticing confluent/standalone-1h
+        # trade counts were suspiciously always zero across the whole universe.
+        # The gap filter's session-boundary rejection (find_zones()'s
+        # `gapped_at_start` check, see zone_detector.py) was hand-tuned against
+        # 5m bars (~75/session) via chart review, where a base ending on the
+        # session's last bar is rare. At 1h density (~6-7 bars/session) it's
+        # routine -- instrumented on RELIANCE: of ~444 valid base candidates,
+        # 263 (59%) were rejected purely for this reason, before any
+        # move/volume check ran at all. Disabling the filter for 1h took
+        # RELIANCE from 3 total zones (0 reversal) to 34 total (5 reversal);
+        # BRITANNIA 5->37 (0->2 reversal), HDFCBANK 5->32 (0->3), TCS 5->53
+        # (1->7) -- consistent across every symbol checked, not cherry-picked.
+        # The underlying concern (overnight gap-open volatility counted as a
+        # continuous intraday move) is specifically an intraday-noise problem;
+        # at swing/1h scale a real overnight gap continuing the next session
+        # IS legitimate price action, not contamination -- keep this filter
+        # off for 1h. Body filter is left on (its effect was much smaller: has
+        # not been shown to cause the same near-total suppression).
+        h_zones = [z for z in find_zones(hourly, timeframe="1h", enforce_gap_filter=False) if z.is_reversal]
         hourly_rsi = rsi(hourly["close"])
         hourly_idx = hourly.index
 
@@ -173,10 +253,9 @@ def run_symbol(
     five_idx = five.index
     n = len(five)
 
-    for zone in m_zones:
-        confluent_hz = _confluent_hourly_zone(zone, h_zones)
-        is_confluent = confluent_hz is not None
-
+    def _scan_zone_for_trades(
+        zone: Zone, zone_source: str, is_confluent: bool, confluent_hz: Zone | None,
+    ) -> None:
         # Scan from confirmed_ts (end of the breakout leg), not breakout_ts
         # (its start) -- the zone's breakout_move_atr/volume_ratio aren't
         # knowable until the whole leg has been observed, so starting from
@@ -187,7 +266,7 @@ def run_symbol(
         start_pos = five_idx.searchsorted(zone.confirmed_ts, side="right")
         start_pos = max(start_pos, 25)
         if start_pos >= n:
-            continue
+            return
 
         pos = start_pos
         while pos < n and zone.touches < max_touches and not zone.broken:
@@ -283,12 +362,18 @@ def run_symbol(
                 exit_price = float(five.iloc[exit_pos]["close"])
                 exit_reason = "max_hold"
 
-            pnl_pct = (
+            gross_pnl_pct = (
                 (exit_price - entry_price) / entry_price * 100 if is_long
                 else (entry_price - exit_price) / entry_price * 100
             )
+            slipped_entry, slipped_exit = _apply_trade_costs(entry_price, exit_price, is_long, exit_reason)
+            net_pnl_pct = (
+                (slipped_exit - slipped_entry) / slipped_entry * 100 if is_long
+                else (slipped_entry - slipped_exit) / slipped_entry * 100
+            ) - ROUND_TRIP_COST_PCT
             trades.append({
                 "symbol": symbol,
+                "zone_source": zone_source,
                 "direction": "long" if is_long else "short",
                 "pattern": zone.pattern,
                 "zone_low": zone.price_low,
@@ -309,12 +394,33 @@ def run_symbol(
                 "exit_ts": five_idx[exit_pos],
                 "exit_price": round(exit_price, 2),
                 "exit_reason": exit_reason,
-                "pnl_pct": round(pnl_pct, 3),
+                "gross_pnl_pct": round(gross_pnl_pct, 3),
+                "pnl_pct": round(net_pnl_pct, 3),   # net of ROUND_TRIP_COST_PCT + slippage -- all stats below use this
                 "hold_bars": exit_pos - entry_pos,
             })
 
             # resume scanning for a FURTHER touch only after this trade has closed
             pos = exit_pos + 1
+
+    for zone in m_zones:
+        confluent_hz = _confluent_hourly_zone(zone, h_zones)
+        _scan_zone_for_trades(zone, "5m", confluent_hz is not None, confluent_hz)
+
+    # Standalone 1h zones -- hourly zones with NO overlapping 5m zone. A 1h
+    # zone WITH a confluent 5m zone is already traded above (as a 5m zone,
+    # confluent=True); trading it again here would double-count the same
+    # touch under two different Zone objects. This is the incremental case:
+    # a real base+breakout on the coarser, more significant hourly timeframe
+    # that the 5m scan never independently found -- entries are still
+    # confirmed on 5m bars (check_entry only cares about zone.price_low/
+    # price_high, which are timeframe-agnostic price levels) for tight,
+    # low-slippage timing against the hourly zone's boundary. Previously
+    # these were detected and simply discarded -- only ever used to set the
+    # `confluent` flag on a matching 5m zone, never traded on their own.
+    for hz in h_zones:
+        if any(_confluent_hourly_zone(mz, [hz]) is not None for mz in m_zones):
+            continue
+        _scan_zone_for_trades(hz, "1h", False, None)
 
     return trades
 
@@ -324,11 +430,11 @@ def run_symbol(
 # runner doesn't model position sizing -- just the trade's % return)
 # ---------------------------------------------------------------------------
 
-def _full_stats(trades: list[dict]) -> dict:
+def _full_stats(trades: list[dict], field: str = "pnl_pct") -> dict:
     import math
     import statistics as _stats
 
-    pnls = [t["pnl_pct"] for t in trades]
+    pnls = [t[field] for t in trades]
     n = len(pnls)
     if n == 0:
         return {}
@@ -376,6 +482,13 @@ def _print_breakdown(trades: list[dict]) -> None:
     if not trades:
         return
 
+    print(f"\n  -- Gross vs net of costs ({ROUND_TRIP_COST_PCT}% round-trip + slippage, see ROUND_TRIP_COST_PCT) --")
+    print(f"  {'Group':<14} {'Trades':>7} {'Win%':>7} {'PF':>6} {'Total%':>8}")
+    gross = _full_stats(trades, field="gross_pnl_pct")
+    net = _full_stats(trades, field="pnl_pct")
+    print(f"  {'Gross':<14} {gross['n']:>7} {gross['win_rate']:>6.1f}% {gross['profit_factor']:>6.2f} {gross['total_pnl_pct']:>+7.2f}%")
+    print(f"  {'Net':<14} {net['n']:>7} {net['win_rate']:>6.1f}% {net['profit_factor']:>6.2f} {net['total_pnl_pct']:>+7.2f}%")
+
     print(f"\n  -- By touch number (does zone strength decay with re-tests?) ------")
     print(f"  {'Touch #':<8} {'Trades':>7} {'Win%':>7} {'PF':>6} {'Total%':>8}")
     by_touch: dict[int, list[dict]] = {}
@@ -384,6 +497,16 @@ def _print_breakdown(trades: list[dict]) -> None:
     for touch_num in sorted(by_touch):
         s = _full_stats(by_touch[touch_num])
         print(f"  {touch_num:<8} {s['n']:>7} {s['win_rate']:>6.1f}% {s['profit_factor']:>6.2f} {s['total_pnl_pct']:>+7.2f}%")
+
+    print(f"\n  -- Zone source: 5m vs standalone 1h (new -- previously discarded) --")
+    print(f"  {'Group':<14} {'Trades':>7} {'Win%':>7} {'PF':>6} {'Total%':>8}")
+    for label, group in [("5m zones", [t for t in trades if t["zone_source"] == "5m"]),
+                          ("Standalone 1h", [t for t in trades if t["zone_source"] == "1h"])]:
+        s = _full_stats(group)
+        if not s:
+            print(f"  {label:<14} {'0':>7}")
+            continue
+        print(f"  {label:<14} {s['n']:>7} {s['win_rate']:>6.1f}% {s['profit_factor']:>6.2f} {s['total_pnl_pct']:>+7.2f}%")
 
     print(f"\n  -- Confluent (1h+5m overlap) vs 5-min-only ------------------------")
     print(f"  {'Group':<14} {'Trades':>7} {'Win%':>7} {'PF':>6} {'Total%':>8}")
