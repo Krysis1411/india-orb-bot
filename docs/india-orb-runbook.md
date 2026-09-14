@@ -1,7 +1,9 @@
 # India ORB Bot — Operational Runbook
 
 Live bot runs continuously on a DigitalOcean VPS during NSE hours (09:00–15:15 IST), started daily
-by a systemd timer. This doc covers access, deployment, monitoring, and known failure modes.
+by a systemd timer. This doc covers access, deployment, monitoring, and known failure modes for
+`india_orb_bot.py` specifically. For the two paper-trading systems that share the same VPS
+(zone strategy, index options), see [docs/paper-trading-runbook.md](paper-trading-runbook.md).
 
 ## Access
 
@@ -38,11 +40,20 @@ Connect: `ssh india-vps`. Repo lives at `~/trading-bot` on the VPS.
 ssh india-vps "bash ~/trading-bot/deploy/update_vps.sh"
 ```
 
-This pulls `origin/main`, reinstalls `requirements.txt` + `requirements-india.txt`, and restarts
-the service. **The script uses `set -euo pipefail`** — if `pip install` fails for any reason (e.g.
-an unsatisfiable version pin), the script aborts *before* reaching the restart step, and the
+This pulls `origin/main`, reinstalls dependencies, and restarts the service. **The script uses
+`set -euo pipefail`** — if `pip install` fails for any reason (e.g. an unsatisfiable version pin,
+or a missing requirements file), the script aborts *before* reaching the restart step, and the
 running process silently keeps executing the old code with no error surfaced beyond the deploy
 log. Always verify after deploying:
+
+> ⚠️ **Currently broken as of the standalone-repo extraction (`cba5925`)**: `deploy/setup_vps.sh`
+> and `deploy/update_vps.sh` both still run
+> `pip install -r requirements.txt -r requirements-india.txt`. `requirements-india.txt` was the
+> old monorepo split-out file; its contents were folded back into this repo's single
+> `requirements.txt` during extraction, and the separate file no longer exists here. Every deploy
+> via `update_vps.sh` since then fails at that line — this is the exact silent-old-code failure
+> mode described above. Fix: drop the `-r requirements-india.txt` argument from both scripts (one
+> `requirements.txt` covers everything now).
 
 ```bash
 ssh india-vps "cd ~/trading-bot && git log -1 --format='%h %s' && systemctl show india-orb-bot --property=ActiveEnterTimestamp"
@@ -132,6 +143,9 @@ delta vs. bar-aligned volume).
   checking if they persist across multiple cycles.
 - `Unknown key name 'StartLimitIntervalSec' in section 'Service'` — harmless systemd version
   mismatch warning from `deploy/india-orb-bot.service`, directive is just ignored.
-- `requirements-india.txt` pins should be sanity-checked against actual PyPI version history when
+- `requirements.txt` pins should be sanity-checked against actual PyPI version history when
   edited — `jugaad-data>=2.6` was an unsatisfiable constraint (package never went past 0.33.x) that
   silently broke every deploy for a period until caught (fixed to `>=0.26`).
+- This repo also needs `pyarrow` installed for `pandas.read_parquet` to work (added to
+  `requirements.txt` in `559955d`) — if a fresh venv is missing it, every backtest/paper-trader run
+  that reads `backtest/data/*.parquet` fails with `ImportError: Unable to find a usable engine`.

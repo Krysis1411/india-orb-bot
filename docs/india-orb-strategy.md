@@ -61,14 +61,19 @@ Exit priority when multiple conditions fire in the same check: **take_profit > s
 
 ## Watchlist selection
 
-- `india_screener.py` picks the top `INDIA_SCREENER_LIMIT` (15) symbols by **previous day's turnover**
-  from the `NSE_UNIVERSE` pool, filtered against `INDIA_BLOCKLIST` and the NSE intraday-eligibility list.
-- Re-run once per session at bot startup (~08:50 IST); does not change intraday.
-- `INDIA_SYMBOLS` (12 names) is the curated fixed list used for backtesting/optimization, not
-  necessarily what's live on a given day — check the actual day's log line
-  (`Today's watchlist (N): ...`) for what's really being traded.
+- `india_screener.py` returns the **fixed** `INDIA_SYMBOLS` list (12 names), minus anything on
+  `INDIA_BLOCKLIST` — that's it. `n` and `universe` arguments exist for API compatibility but are
+  ignored.
+- The previous design (top-`INDIA_SCREENER_LIMIT`-by-previous-day-turnover from a broader NSE
+  universe) was **retired**: a 60-day grid-search showed it consistently picked the wrong names —
+  high-turnover stocks like RELIANCE and HDFC have negligible ORB edges on NSE, while the best ORB
+  candidates (TORNTPHARM, BHARTIARTL, JSWSTEEL) rarely surface in a top-15-by-turnover ranking.
+  `INDIA_SCREENER_LIMIT` in `config.py` is now unused by this path.
+- Re-run once per session at bot startup (~08:50 IST); does not change intraday. Check the day's log
+  line (`Watchlist (N): ...`) for exactly what's live — it will always be `INDIA_SYMBOLS` minus any
+  blocklisted names, but confirm rather than assume.
 - `INDIA_BLOCKLIST` (30 symbols) — proven ORB losers from backtests, permanently excluded regardless
-  of screener ranking. See the comments above the list in `config.py` for the backtest PF/win-rate
+  of the fixed list. See the comments above the list in `config.py` for the backtest PF/win-rate
   evidence behind each exclusion.
 
 ## Config reference (`config.py`)
