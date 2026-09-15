@@ -272,7 +272,12 @@ class ZonePaperTrader:
         # get slower every day as live history accumulates. _refresh_zones()
         # only ever scans the recent tail after this.
         if len(state.bars_5m) >= 50:
-            state.zones_5m = [z for z in find_zones(state.bars_5m, timeframe="5m") if z.is_reversal]
+            # Both reversal (DBR/RBD) AND continuation (RBR/DBD) zones are
+            # traded now, not just reversal -- see backtest/zone_backtest.py's
+            # zone_class comment for why. `pattern` in the trade log already
+            # tells reversal vs continuation apart (RBD/DBR vs RBR/DBD) so no
+            # new logged field is needed, just this filter removed.
+            state.zones_5m = find_zones(state.bars_5m, timeframe="5m")
         self.states[symbol] = state
 
     def load_state(self) -> None:
@@ -355,7 +360,7 @@ class ZonePaperTrader:
         known_keys = {z.base_start for z in state.zones_5m}
         new_zones = [
             z for z in find_zones(tail, timeframe="5m")
-            if z.is_reversal and z.base_start not in known_keys
+            if z.base_start not in known_keys
         ]
         state.zones_5m.extend(new_zones)
 

@@ -22,11 +22,16 @@ by what happened before and after the base:
 | DBD | down | down | supply | continuation |
 | RBD | up | down | supply | **reversal** |
 
-**Only reversal zones (DBR/RBD) are traded.** A reversal means the trend actually changed
-direction at that level — a much stronger signal than a continuation zone just extending a move
-already in progress. The "into the base" leg only counts as a real rally/drop (not drift) if it
-has both a real price move (≥ `legin_min_move_atr`, default 1.0 ATR) **and** real volume behind it
-(≥ `legin_min_volume_ratio`, default 1.1×) — price drifting on thin volume isn't a rally.
+**Both reversal (DBR/RBD) and continuation (RBR/DBD) zones are traded**, tagged with `zone_class`
+so the two can be compared directly (see "Reversal vs continuation" below). A reversal means the
+trend actually changed direction at that level — theoretically a much stronger signal than a
+continuation zone just extending a move already in progress — but until 2026-09-15 that was only
+ever a stated belief, never actually tested against this data (unlike confluent/divergence/
+HTF-momentum, which are logged and checked empirically). Continuation zones were previously found
+by `find_zones()` and silently discarded. The "into the base" leg only counts as a real rally/drop
+(not drift) if it has both a real price move (≥ `legin_min_move_atr`, default 1.0 ATR) **and** real
+volume behind it (≥ `legin_min_volume_ratio`, default 1.1×) — price drifting on thin volume isn't a
+rally. This check applies identically regardless of reversal/continuation classification.
 
 **Zone strength** = `breakout_move_atr × breakout_volume_ratio`, multiplied again by
 `legin_volume_ratio` for reversal zones. A big move on average volume, or an average move on huge

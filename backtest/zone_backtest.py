@@ -196,13 +196,20 @@ def run_symbol(
         return []
 
     five = load_nse_bars_df(m_path)
-    m_zones = [
-        z for z in find_zones(
-            five, timeframe="5m",
-            enforce_body_filter=enforce_body_filter,
-            enforce_gap_filter=enforce_gap_filter,
-        ) if z.is_reversal
-    ]
+    # Both reversal (DBR/RBD) AND continuation (RBR/DBD) zones are kept and
+    # traded now -- previously continuation zones were found by find_zones()
+    # and silently discarded. "Reversal zones are the powerful ones" (see
+    # zone_detector.py's module docstring) was a stated design belief, never
+    # actually tested against this data, unlike confluent/divergence/
+    # HTF-momentum which are all logged and checked empirically. Each trade
+    # is tagged with zone_class so the two buckets can be compared directly
+    # (see the breakdown table below) rather than assuming continuation zones
+    # are worse and never finding out.
+    m_zones = find_zones(
+        five, timeframe="5m",
+        enforce_body_filter=enforce_body_filter,
+        enforce_gap_filter=enforce_gap_filter,
+    )
     if not m_zones:
         return []
     five_atr = atr_series(five, 14)
@@ -231,7 +238,7 @@ def run_symbol(
         # IS legitimate price action, not contamination -- keep this filter
         # off for 1h. Body filter is left on (its effect was much smaller: has
         # not been shown to cause the same near-total suppression).
-        h_zones = [z for z in find_zones(hourly, timeframe="1h", enforce_gap_filter=False) if z.is_reversal]
+        h_zones = find_zones(hourly, timeframe="1h", enforce_gap_filter=False)
         hourly_rsi = rsi(hourly["close"])
         hourly_idx = hourly.index
 
@@ -374,6 +381,7 @@ def run_symbol(
             trades.append({
                 "symbol": symbol,
                 "zone_source": zone_source,
+                "zone_class": "reversal" if zone.is_reversal else "continuation",
                 "direction": "long" if is_long else "short",
                 "pattern": zone.pattern,
                 "zone_low": zone.price_low,
@@ -497,6 +505,16 @@ def _print_breakdown(trades: list[dict]) -> None:
     for touch_num in sorted(by_touch):
         s = _full_stats(by_touch[touch_num])
         print(f"  {touch_num:<8} {s['n']:>7} {s['win_rate']:>6.1f}% {s['profit_factor']:>6.2f} {s['total_pnl_pct']:>+7.2f}%")
+
+    print(f"\n  -- Reversal (DBR/RBD) vs Continuation (RBR/DBD) (new -- previously discarded) --")
+    print(f"  {'Group':<14} {'Trades':>7} {'Win%':>7} {'PF':>6} {'Total%':>8}")
+    for label, group in [("Reversal", [t for t in trades if t["zone_class"] == "reversal"]),
+                          ("Continuation", [t for t in trades if t["zone_class"] == "continuation"])]:
+        s = _full_stats(group)
+        if not s:
+            print(f"  {label:<14} {'0':>7}")
+            continue
+        print(f"  {label:<14} {s['n']:>7} {s['win_rate']:>6.1f}% {s['profit_factor']:>6.2f} {s['total_pnl_pct']:>+7.2f}%")
 
     print(f"\n  -- Zone source: 5m vs standalone 1h (new -- previously discarded) --")
     print(f"  {'Group':<14} {'Trades':>7} {'Win%':>7} {'PF':>6} {'Total%':>8}")
