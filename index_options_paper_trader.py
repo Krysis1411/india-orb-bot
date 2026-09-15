@@ -416,6 +416,7 @@ class IndexOptionsPaperTrader:
         )
         row = {
             "underlying": pos.underlying, "direction": pos.direction, "pattern": pos.pattern,
+            "zone_class": "reversal" if pos.pattern in ("DBR", "RBD") else "continuation",
             "option_symbol": pos.option_symbol, "option_type": pos.option_type,
             "strike": pos.strike, "expiry": pos.expiry, "touch_number": pos.touch_number,
             "entry_ts": pos.entry_ts, "entry_underlying_price": pos.entry_price,

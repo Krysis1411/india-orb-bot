@@ -488,6 +488,7 @@ class ZonePaperTrader:
         )
         row = {
             "symbol": opt_pos.symbol, "direction": opt_pos.direction, "pattern": opt_pos.pattern,
+            "zone_class": "reversal" if opt_pos.pattern in ("DBR", "RBD") else "continuation",
             "option_symbol": opt_pos.option_symbol, "option_type": opt_pos.option_type,
             "strike": opt_pos.strike, "expiry": opt_pos.expiry, "touch_number": opt_pos.touch_number,
             "entry_ts": opt_pos.entry_ts, "entry_option_price": opt_pos.entry_option_price,
@@ -575,6 +576,7 @@ class ZonePaperTrader:
         )
         row = {
             "symbol": pos.symbol, "direction": pos.direction, "pattern": pos.pattern,
+            "zone_class": "reversal" if pos.pattern in ("DBR", "RBD") else "continuation",
             "zone_low": pos.zone_low, "zone_high": pos.zone_high,
             "touch_number": pos.touch_number,
             "entry_ts": pos.entry_ts, "entry_price": pos.entry_price,
