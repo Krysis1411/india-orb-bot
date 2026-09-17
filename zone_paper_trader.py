@@ -272,12 +272,19 @@ class ZonePaperTrader:
         # get slower every day as live history accumulates. _refresh_zones()
         # only ever scans the recent tail after this.
         if len(state.bars_5m) >= 50:
-            # Both reversal (DBR/RBD) AND continuation (RBR/DBD) zones are
-            # traded now, not just reversal -- see backtest/zone_backtest.py's
-            # zone_class comment for why. `pattern` in the trade log already
-            # tells reversal vs continuation apart (RBD/DBR vs RBR/DBD) so no
-            # new logged field is needed, just this filter removed.
-            state.zones_5m = find_zones(state.bars_5m, timeframe="5m")
+            # Reversal-only again as of 2026-09-17. Continuation zones (RBR/
+            # DBD) were traded live for two days as a measured experiment
+            # (see backtest/zone_backtest.py's zone_class comment) -- the
+            # full-universe backtest came back conclusive, not ambiguous:
+            # 936 continuation trades at 33.2% win/PF 0.39/-252.08% net vs.
+            # 116 reversal trades at 37.9% win/PF 0.50/-24.35% net. Reversal
+            # alone is still net-negative after costs, but continuation is
+            # unambiguously worse and was doing nearly all the damage in the
+            # combined total. Reverted rather than left running on a
+            # confirmed-bad hypothesis. The backtest itself still scans both
+            # classes (tagged via zone_class) in case that conclusion is
+            # ever worth re-checking against fresh data.
+            state.zones_5m = [z for z in find_zones(state.bars_5m, timeframe="5m") if z.is_reversal]
         self.states[symbol] = state
 
     def load_state(self) -> None:
@@ -360,7 +367,7 @@ class ZonePaperTrader:
         known_keys = {z.base_start for z in state.zones_5m}
         new_zones = [
             z for z in find_zones(tail, timeframe="5m")
-            if z.base_start not in known_keys
+            if z.is_reversal and z.base_start not in known_keys
         ]
         state.zones_5m.extend(new_zones)
 

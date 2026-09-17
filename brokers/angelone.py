@@ -423,6 +423,17 @@ class AngelOneClient:
         limits, i.e. a real flakiness/false-positive in AngelOne's own
         enforcement, not something pacing alone fixes. A short retry
         recovers a meaningful fraction of these transient false rejections.
+
+        Also retries on connection resets ('Connection aborted' /
+        'Connection reset by peer') -- a NEW failure mode that showed up
+        2026-09-15 after the zone universe grew to 153 symbols, and got
+        worse the next day (240 occurrences on 2026-09-16, now outnumbering
+        the classic rate-limit rejection). Unlike the rate-limit case this
+        is a TCP-level reset, not an application-level rejection -- still
+        transient by nature, and previously NOT retried at all (fell straight
+        through to failure), unlike the rate-limit branch below. Same fix
+        applies: a short retry recovers connections that reset once but
+        succeed on a fresh attempt.
         """
         self._ensure_connected()
         today = datetime.now(IST).date()
@@ -451,7 +462,13 @@ class AngelOneClient:
                 return df if not df.empty else None
             except Exception as e:
                 last_err = e
-                if attempt < max_retries and "exceeding access rate" in str(e).lower():
+                msg = str(e).lower()
+                is_retryable = (
+                    "exceeding access rate" in msg
+                    or "connection aborted" in msg
+                    or "connection reset" in msg
+                )
+                if attempt < max_retries and is_retryable:
                     time.sleep(2.0 * (attempt + 1))   # 2s, then 4s
                     continue
                 break

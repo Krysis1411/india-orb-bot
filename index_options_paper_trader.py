@@ -178,11 +178,15 @@ class IndexOptionsPaperTrader:
         state = UnderlyingState(name, INDEX_TOKENS[name], fut["token"], fut["symbol"])
         state.bars_5m, state.bars_1h = _warm_start_bars(name)
         if len(state.bars_5m) >= 50:
-            # Reversal AND continuation zones both traded now -- see
-            # backtest/zone_backtest.py's zone_class comment for why.
-            state.zones_5m = find_zones(state.bars_5m, timeframe="5m")
+            # Reversal-only again as of 2026-09-17 -- see zone_paper_trader.py's
+            # matching comment: continuation zones were run live for two days
+            # as a measured experiment, and the full-universe backtest came
+            # back conclusive (936 continuation trades at 33.2% win/PF 0.39
+            # vs. 116 reversal trades at 37.9% win/PF 0.50, continuation
+            # doing nearly all the damage in the combined total).
+            state.zones_5m = [z for z in find_zones(state.bars_5m, timeframe="5m") if z.is_reversal]
         self.states[name] = state
-        log.info(f"{name}: warm-started {len(state.bars_5m)} 5m bars, {len(state.zones_5m)} live zone(s) — volume proxy: {fut['symbol']}")
+        log.info(f"{name}: warm-started {len(state.bars_5m)} 5m bars, {len(state.zones_5m)} live reversal zone(s) — volume proxy: {fut['symbol']}")
         return True
 
     def load_state(self) -> None:
@@ -250,7 +254,7 @@ class IndexOptionsPaperTrader:
         known_keys = {z.base_start for z in state.zones_5m}
         new_zones = [
             z for z in find_zones(tail, timeframe="5m")
-            if z.base_start not in known_keys
+            if z.is_reversal and z.base_start not in known_keys
         ]
         state.zones_5m.extend(new_zones)
         for z in state.zones_5m:
