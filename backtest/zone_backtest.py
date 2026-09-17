@@ -189,6 +189,10 @@ def run_symbol(
     max_touches: int = MAX_TOUCHES,
     enforce_body_filter: bool = True,   # False: for review exports -- keep+tag wick-dominated bases
     enforce_gap_filter: bool = True,    # False: for review exports -- keep+tag gap-contaminated legs
+    reversal_only: bool = False,   # True: skip continuation zones entirely -- for focused/faster
+                                     # experiments on the reversal-only bucket (the one actually
+                                     # traded live as of 2026-09-17), not the standing diagnostic
+                                     # default below which keeps scanning both classes.
 ) -> list[dict]:
     h_path = DATA_DIR / f"{symbol}_NSE_1h.parquet"
     m_path = DATA_DIR / f"{symbol}_NSE_5m.parquet"
@@ -210,6 +214,8 @@ def run_symbol(
         enforce_body_filter=enforce_body_filter,
         enforce_gap_filter=enforce_gap_filter,
     )
+    if reversal_only:
+        m_zones = [z for z in m_zones if z.is_reversal]
     if not m_zones:
         return []
     five_atr = atr_series(five, 14)
@@ -239,6 +245,8 @@ def run_symbol(
         # off for 1h. Body filter is left on (its effect was much smaller: has
         # not been shown to cause the same near-total suppression).
         h_zones = find_zones(hourly, timeframe="1h", enforce_gap_filter=False)
+        if reversal_only:
+            h_zones = [z for z in h_zones if z.is_reversal]
         hourly_rsi = rsi(hourly["close"])
         hourly_idx = hourly.index
 
