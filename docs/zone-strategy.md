@@ -22,16 +22,31 @@ by what happened before and after the base:
 | DBD | down | down | supply | continuation |
 | RBD | up | down | supply | **reversal** |
 
-**Both reversal (DBR/RBD) and continuation (RBR/DBD) zones are traded**, tagged with `zone_class`
-so the two can be compared directly (see "Reversal vs continuation" below). A reversal means the
-trend actually changed direction at that level — theoretically a much stronger signal than a
-continuation zone just extending a move already in progress — but until 2026-09-15 that was only
-ever a stated belief, never actually tested against this data (unlike confluent/divergence/
-HTF-momentum, which are logged and checked empirically). Continuation zones were previously found
-by `find_zones()` and silently discarded. The "into the base" leg only counts as a real rally/drop
-(not drift) if it has both a real price move (≥ `legin_min_move_atr`, default 1.0 ATR) **and** real
-volume behind it (≥ `legin_min_volume_ratio`, default 1.1×) — price drifting on thin volume isn't a
-rally. This check applies identically regardless of reversal/continuation classification.
+**Only reversal zones (DBR/RBD) are traded live, as of 2026-09-17.** Continuation zones (RBR/DBD)
+were traded live for two days (2026-09-15 to 2026-09-17) as a measured experiment — `find_zones()`
+had always found them and silently discarded them, and "reversal zones are the powerful ones" was
+only ever a stated belief, never actually tested (unlike confluent/divergence/HTF-momentum, which
+are logged and checked empirically). The full-universe backtest came back conclusive, not
+ambiguous:
+
+| Group | Trades | Win% | PF | Total% (net) |
+|---|---|---|---|---|
+| Reversal (DBR/RBD) | 116 | 37.9% | 0.50 | -24.35% |
+| Continuation (RBR/DBD) | 936 | 33.2% | 0.39 | **-252.08%** |
+
+Continuation zones fire ~8x more often but with a meaningfully lower win rate and PF, and account
+for nearly all the damage in the combined total. Reversal-only is still net-negative after costs
+(PF 0.50 isn't good — see "Validation status" below) but is clearly the better of the two, not a
+close call. **Reverted live trading (`zone_paper_trader.py`, `index_options_paper_trader.py`) back
+to reversal-only** rather than leave it running on a confirmed-bad hypothesis. `backtest/
+zone_backtest.py` still scans and tags both classes via `zone_class` — kept as a standing
+diagnostic in case this conclusion is ever worth re-checking against fresh data, not because the
+answer is still open.
+
+The "into the base" leg only counts as a real rally/drop (not drift) if it has both a real price
+move (≥ `legin_min_move_atr`, default 1.0 ATR) **and** real volume behind it
+(≥ `legin_min_volume_ratio`, default 1.1×) — price drifting on thin volume isn't a rally. This
+check applies identically regardless of reversal/continuation classification.
 
 **Zone strength** = `breakout_move_atr × breakout_volume_ratio`, multiplied again by
 `legin_volume_ratio` for reversal zones. A big move on average volume, or an average move on huge

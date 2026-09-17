@@ -104,6 +104,19 @@ ssh india-vps "grep -c 'exceeding access rate' ~/india-orb-bot/logs/zone_paper_\
 
 ## Known quirks
 
+- **Connection resets from AngelOne, distinct from rate-limit rejections** — showed up 2026-09-15
+  right after the zone universe grew to 153 cached symbols, and got worse the next day (240
+  `ConnectionResetError`/"Connection aborted" occurrences on 2026-09-16, outnumbering the classic
+  "exceeding access rate" rejection at 76). Check with:
+  ```bash
+  ssh india-vps "journalctl -u zone-paper-bot --no-pager --since '<date> 00:00' --until '<date+1> 00:00' | grep -c 'Connection reset\|Connection aborted'"
+  ```
+  Fixed in `brokers/angelone.py::get_today_candles` (2026-09-17): the retry-with-backoff logic
+  previously only covered "exceeding access rate" — a connection reset fell straight through to
+  failure with zero retries. Now retries both. If this count keeps climbing even with retries in
+  place, the next lever is trimming the scanned universe (fewer symbols = fewer requests/cycle),
+  not more retries — retrying harder against a server that's actively throttling the account risks
+  making it worse, not better.
 - Neither service is covered by `setup_vps.sh`'s automated install — a fresh VPS needs the manual
   steps above run once.
 - Neither is restarted by `update_vps.sh` — a code change needs the manual restart command above,
