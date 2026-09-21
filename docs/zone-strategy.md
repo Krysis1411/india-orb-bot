@@ -192,6 +192,54 @@ Triple-Screen, see [docs/kaufman-tsam-notes.md](kaufman-tsam-notes.md)) have all
 repeated in-sample re-runs against the full cached dataset — fine during design (Kaufman Ch.21),
 but it means nothing measured against that full range is a validated result. See below.
 
+## Exit calibration: `target_rr` is not the lever (2026-09-21)
+
+`target_rr` (2.0), `BREAKEVEN_TRIGGER_R` and `TRAIL_PROFIT_PCT` were never re-validated after the cost
+model went in. `backtest/grid_search_rr.py` swept `target_rr` on the reversal-only bucket (153 cached
+symbols, 125 trades, net of costs; `target_rr` only changes the exit level, so entries are identical
+across the grid):
+
+| target_rr | Win% | PF | Expectancy | Total% |
+|---|---|---|---|---|
+| 1.5 | 40.0% | 0.57 | -0.185% | -23.09% |
+| 2.0 | 38.4% | 0.59 | -0.174% | -21.72% |
+| 2.5 | 38.4% | 0.60 | -0.171% | -21.31% |
+| 3.0 | 38.4% | 0.54 | -0.196% | -24.53% |
+| 4.0 | 38.4% | 0.60 | -0.173% | -21.57% |
+
+Every setting is net-negative and PF only moves within 0.54-0.60, so the exit target is not what is
+holding the strategy back. The binding constraint is a ~38-40% win rate, which points at entry
+quality or stop placement. Not yet swept: `BREAKEVEN_TRIGGER_R`, `TRAIL_PROFIT_PCT`,
+`stop_buffer_pct`, `MIN_RISK_ATR_MULT`.
+
+## Live vs backtest parity (fixed 2026-09-21)
+
+The live bots and the backtest were not evaluating the same thing. Found by comparing cycle counts
+(zone bot ~11-13 cycles/day vs ~25 intended) and then reading the entry code:
+
+- **Bar skipping.** Both live bots evaluated only `bars_5m.iloc[-1]` per cycle, so with 15-30+ minute
+  cycles most 5-min bars were never checked -- entries and stop/target touches alike. `run_cycle()` now
+  replays every bar since the previous check, oldest first (capped at one session; the first cycle
+  after a restart evaluates only the latest bar, since replaying a restarted day could re-trigger
+  touches already taken). Verified by driving the real `run_cycle()` over historical bars at 1, 6 and
+  12 bars per cycle: fixed code gives identical trades at every length; the pre-fix code gave 2, 1 and
+  0 trades on the same window. **The old cycle speed was therefore also understating live trade
+  frequency**, not just distorting timing -- live frequency numbers from before this date are a floor.
+- **Exit-before-entry ordering.** A position could be stopped out by the bar it entered on (that bar's
+  low predates the fill). Exits now run before entries per bar, so a new position is first checked on
+  the next bar, as in the backtest.
+- **`confirmed_ts` gate.** A zone is tradable only strictly after the last bar of its breakout leg
+  (backtest rule); the live code could trade the confirming bar itself.
+- **Dedupe.** One open position per symbol+direction (per underlying+direction for the index bot).
+  BHEL on 2026-09-16 opened two identical longs from two overlapping zones (DBR + RBR) confirming on the
+  same bar. The backtest's reversal bucket has no such duplicates (0 of 116); the ~53 duplicate rows in
+  the full 1,052-trade file are continuation / standalone-1h overlaps.
+- **Known limitation.** Option entry/exit prices are the live LTP at processing time, so for a
+  replayed signal they can lag the signal bar by up to one cycle.
+- A float-precision edge case remains: live rounds entry/stop/peak to 4 decimals while the backtest
+  keeps full precision, so an exit at a stop sitting exactly on a bar's low can resolve one bar apart
+  (same exit price).
+
 ## Options overlay (live paper trading only, not in the backtest)
 
 Every equity zone signal in `zone_paper_trader.py` **also** resolves and paper-trades a real,
@@ -239,11 +287,10 @@ has no zones.
 
 - **Transaction costs are modeled in `zone_backtest.py`** (see "Transaction costs and slippage"
   above) as of 2026-08-13 — `pnl_pct` in its output is net of an estimated round-trip cost +
-  slippage. **The paper traders (`zone_paper_trader.py`, `index_options_paper_trader.py`) do
-  NOT yet apply this same cost model** to their logged P&L — they use real live prices for fills,
-  but don't subtract STT/brokerage/slippage from the recorded result. Treat paper-trader P&L as
-  gross, and the backtest's net-vs-gross comparison as the more honest read of what real costs
-  would do to it.
+  slippage. As of 2026-09-21 **`zone_paper_trades.csv` also has a `net_pnl_pct` column** (same cost
+  model; `pnl_pct` stays gross for continuity with older rows). The options-overlay and index-option
+  logs are still gross: their costs are premium-based (STT on the sell-side premium, flat brokerage)
+  and this model doesn't describe them, so no number is better than an invented one.
 - **In-sample/out-of-sample split**: `OOS_START` (2026-05-01) marks a holdout that must be used
   **exactly once**. If the OOS numbers look bad, the correct conclusion is "this rule set doesn't
   hold up," not "adjust one more threshold and re-check" — that exact re-tuning pattern already

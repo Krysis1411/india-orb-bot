@@ -117,6 +117,18 @@ ssh india-vps "grep -c 'exceeding access rate' ~/india-orb-bot/logs/zone_paper_\
   place, the next lever is trimming the scanned universe (fewer symbols = fewer requests/cycle),
   not more retries — retrying harder against a server that's actively throttling the account risks
   making it worse, not better.
+- **The retry fix moved failures rather than removing them (2026-09-21).** Per-day counts from the
+  session logs: connection resets fell 120 -> 3 -> 2 (Sep 16/17/18) but "exceeding access rate" rose
+  76 -> 213 -> 219, and total failed candle fetches stayed ~200-236/day. The zone bot also completes only
+  ~11-13 cycles/day (index bot ~23-24) because retries with backoff on ~220 failures stretch each cycle
+  well past the 15-minute interval. Since the per-bar replay fix (2026-09-21) a slow cycle no longer
+  skips bars, but data is still fetched late. Next lever if this persists: trim the scanned universe.
+  Quick check: `grep -c 'Cycle complete' logs/zone_paper_<date>.log` (~25 expected).
+- **Secrets in the journal (fixed 2026-09-21).** SmartApi's own logger printed the full request headers
+  -- bearer JWT and API key -- on every failed request. `brokers/angelone.py` now redacts them, but
+  journal entries written before that date still contain them (JWTs expire at midnight; the API key does
+  not). Don't paste raw journal output anywhere external; consider `journalctl --vacuum-time` on the VPS
+  and rotating the SmartAPI key if the old journal or a transcript could have been exposed.
 - Neither service is covered by `setup_vps.sh`'s automated install — a fresh VPS needs the manual
   steps above run once.
 - Neither is restarted by `update_vps.sh` — a code change needs the manual restart command above,

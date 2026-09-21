@@ -65,6 +65,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from dotenv import load_dotenv
 
+from backtest.zone_backtest import ROUND_TRIP_COST_PCT, _apply_trade_costs
 from brokers.angelone import INTERVAL_1HOUR, INTERVAL_5MIN, AngelOneClient
 from strategies.entry_confirmation import check_entry
 from strategies.zone_detector import Zone, atr_series, find_zones
@@ -622,6 +623,12 @@ class ZonePaperTrader:
             "entry_ts": pos.entry_ts, "entry_price": pos.entry_price,
             "exit_ts": exit_ts.isoformat(), "exit_price": round(exit_price, 4),
             "exit_reason": exit_reason, "pnl_pct": round(pnl_pct, 3),
+            # Same cost model as backtest/zone_backtest.py (round-trip cost +
+            # asymmetric slippage), so live results read on the same footing
+            # as backtest results. pnl_pct above stays GROSS for continuity
+            # with existing rows. Equity only -- the options logs use
+            # premium-based costs that this model doesn't describe.
+            "net_pnl_pct": round(_net_pnl_pct(pos.entry_price, exit_price, is_long, exit_reason), 3),
         }
         _append_trade_row(row)
         state = self.states.get(pos.symbol)
@@ -685,6 +692,12 @@ class ZonePaperTrader:
             f"Cycle complete — {len(self.open_positions)} open equity position(s): {positions_desc} "
             f"| {len(self.open_option_positions)} open option position(s)"
         )
+
+
+def _net_pnl_pct(entry_price: float, exit_price: float, is_long: bool, exit_reason: str) -> float:
+    slipped_entry, slipped_exit = _apply_trade_costs(entry_price, exit_price, is_long, exit_reason)
+    move = (slipped_exit - slipped_entry) if is_long else (slipped_entry - slipped_exit)
+    return move / slipped_entry * 100 - ROUND_TRIP_COST_PCT
 
 
 def _append_trade_row(row: dict) -> None:
