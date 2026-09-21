@@ -246,6 +246,16 @@ class IndexOptionsPaperTrader:
         is_new = latest_ts != state.last_checked_bar_ts
         return is_new
 
+    def _unchecked_bar_positions(self, state: UnderlyingState) -> list[int]:
+        """Integer positions in bars_5m of every bar closed since the last
+        check, oldest first. First cycle after a (re)start has no baseline, so
+        only the latest bar is evaluated. Capped at one session of bars."""
+        idx = state.bars_5m.index
+        if state.last_checked_bar_ts is None:
+            return [len(idx) - 1]
+        start = int(idx.searchsorted(state.last_checked_bar_ts, side="right"))
+        return list(range(max(start, len(idx) - 78), len(idx)))
+
     def _refresh_zones(self, state: UnderlyingState) -> None:
         if len(state.bars_5m) < 50:
             return
@@ -266,19 +276,25 @@ class IndexOptionsPaperTrader:
     # Entries
     # ------------------------------------------------------------------
 
-    def _check_new_entries(self, state: UnderlyingState) -> None:
+    def _check_new_entries(self, state: UnderlyingState, i: int, five_atr: pd.Series) -> None:
+        """Evaluate entries as of the bar at integer position `i` (see
+        run_cycle's per-bar replay) -- not necessarily the latest bar."""
         five = state.bars_5m
-        five_atr = atr_series(five, 14)
-        n = len(five)
+        n = i + 1
+        bar_ts = five.index[i]
 
         for zone in state.zones_5m:
             if zone.touches >= MAX_TOUCHES or zone.broken:
+                continue
+            # Backtest rule: a zone is only tradable strictly after the last
+            # bar of its breakout leg (confirmed_ts).
+            if bar_ts <= zone.confirmed_ts:
                 continue
             key = zone.base_start.isoformat()
             if state.zone_has_open_position.get(key):
                 continue
 
-            close = float(five.iloc[-1]["close"])
+            close = float(five.iloc[i]["close"])
             if zone.is_invalidated_by(close, INVALIDATION_BUFFER_PCT):
                 zone.broken = True
                 state.zone_touch_state[key] = (zone.touches, zone.broken)
@@ -298,9 +314,15 @@ class IndexOptionsPaperTrader:
                 stop = zone.price_high * (1 + STOP_BUFFER_PCT)
                 risk = stop - entry_price
 
-            atr_here = five_atr.iloc[-1]
+            atr_here = five_atr.iloc[i]
             min_risk = MIN_RISK_ATR_MULT * atr_here if pd.notna(atr_here) and atr_here > 0 else 0.0
             if risk <= 0 or risk < min_risk:
+                continue
+
+            # One open position per underlying+direction (overlapping zones
+            # confirming on the same bar must not open duplicate positions).
+            direction = "long" if is_long else "short"
+            if any(p.underlying == state.name and p.direction == direction for p in self.open_positions):
                 continue
 
             target = entry_price + risk * TARGET_RR if is_long else entry_price - risk * TARGET_RR
@@ -309,7 +331,7 @@ class IndexOptionsPaperTrader:
             # short zone -> buy PE. Only commit the touch/zone-lock if this
             # actually resolves to a live, quotable contract.
             option_type = "CE" if is_long else "PE"
-            entry_date = five.index[-1].tz_convert(IST).date()
+            entry_date = bar_ts.tz_convert(IST).date()
             expiry = _pick_expiry(state.name, entry_date)
             strike = round(entry_price / STRIKE_INTERVAL[state.name]) * STRIKE_INTERVAL[state.name]
             contract = self.client.resolve_option(state.name, expiry, strike, option_type)
@@ -329,7 +351,7 @@ class IndexOptionsPaperTrader:
                 underlying=state.name, direction="long" if is_long else "short",
                 pattern=zone.pattern, zone_key=key,
                 zone_low=zone.price_low, zone_high=zone.price_high,
-                entry_ts=five.index[-1].isoformat(), entry_price=round(entry_price, 2),
+                entry_ts=bar_ts.isoformat(), entry_price=round(entry_price, 2),
                 stop=round(stop, 2), cur_stop=round(stop, 2), target=round(target, 2),
                 peak=round(entry_price, 2), risk=round(risk, 2), touch_number=zone.touches,
                 option_type=option_type, option_symbol=contract["symbol"], option_token=contract["token"],
@@ -347,16 +369,20 @@ class IndexOptionsPaperTrader:
     # real live LTP at that moment is what gets recorded as P&L.
     # ------------------------------------------------------------------
 
-    def _check_exits(self, state: UnderlyingState) -> None:
+    def _check_exits(self, state: UnderlyingState, i: int) -> None:
+        """Exit check for the bar at integer position `i`. Only positions
+        opened BEFORE this bar are checked against it (backtest starts exit-
+        scanning at entry_pos+1); run_cycle runs exits before entries."""
         if state.bars_5m.empty:
             return
-        bar = state.bars_5m.iloc[-1]
+        bar = state.bars_5m.iloc[i]
+        bar_ts = state.bars_5m.index[i]
         if bar["volume"] <= 0:
             return
 
         still_open: list[OpenPosition] = []
         for pos in self.open_positions:
-            if pos.underlying != state.name:
+            if pos.underlying != state.name or pd.Timestamp(pos.entry_ts) >= bar_ts:
                 still_open.append(pos)
                 continue
 
@@ -375,7 +401,7 @@ class IndexOptionsPaperTrader:
 
             if exit_reason is None:
                 entry_pos_idx = state.bars_5m.index.searchsorted(pd.Timestamp(pos.entry_ts), side="right")
-                bars_held = len(state.bars_5m) - entry_pos_idx
+                bars_held = (i + 1) - entry_pos_idx
                 if bars_held >= MAX_HOLD_BARS:
                     exit_reason = "max_hold"
                 elif date.today() >= date.fromisoformat(pos.expiry):
@@ -384,7 +410,7 @@ class IndexOptionsPaperTrader:
                     exit_reason = "contract_expiry"
 
             if exit_reason is not None:
-                self._close_position(pos, exit_reason, state.bars_5m.index[-1])
+                self._close_position(pos, exit_reason, bar_ts)
                 continue
 
             if is_long:
@@ -448,10 +474,15 @@ class IndexOptionsPaperTrader:
                 _time.sleep(1.0)
             if not has_new_bar:
                 continue
+            bar_positions = self._unchecked_bar_positions(state)
             state.last_checked_bar_ts = state.bars_5m.index[-1]
             self._refresh_zones(state)
-            self._check_new_entries(state)
-            self._check_exits(state)
+            five_atr = atr_series(state.bars_5m, 14)
+            # Replay every bar since the last cycle, exits before entries per
+            # bar -- see zone_paper_trader.py's matching comment for why.
+            for i in bar_positions:
+                self._check_exits(state, i)
+                self._check_new_entries(state, i, five_atr)
         self.save_state()
         positions_desc = ", ".join(f"{p.underlying} {p.option_symbol}" for p in self.open_positions) or "none"
         log.info(f"Cycle complete — {len(self.open_positions)} open position(s): {positions_desc}")

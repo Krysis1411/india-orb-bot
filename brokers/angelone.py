@@ -16,6 +16,7 @@ The JWT session token is valid until midnight — no need to re-auth mid-day.
 """
 import logging
 import os
+import re
 import time
 from collections import defaultdict
 from datetime import date, datetime
@@ -28,6 +29,42 @@ from SmartApi import SmartConnect
 
 log = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
+
+
+class _RedactSecrets(logging.Filter):
+    """Blank out credentials in log records. SmartApi's own logzero logger
+    dumps the full request headers -- including 'Authorization': 'Bearer
+    <JWT>' and 'X-PrivateKey': '<api key>' -- on EVERY failed request, straight
+    to stderr/journald (found 2026-09-21: hundreds of copies per session in
+    the VPS journal). Our own log.error(...) lines never contained them; this
+    is the third-party logger."""
+
+    _PATTERNS = (
+        (re.compile(r"('Authorization':\s*')[^']*(')"), r"\1<redacted>\2"),
+        (re.compile(r"('X-PrivateKey':\s*')[^']*(')"), r"\1<redacted>\2"),
+        (re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]+"), r"\1<redacted>"),
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        for pat, repl in self._PATTERNS:
+            msg = pat.sub(repl, msg)
+        record.msg, record.args = msg, ()
+        return True
+
+
+def _install_secret_redaction() -> None:
+    try:
+        from logzero import logger as _lz_logger   # SmartApi's logger
+    except ImportError:
+        return
+    _lz_logger.addFilter(_RedactSecrets())
+
+
+_install_secret_redaction()
 
 # SmartAPI candle interval codes
 INTERVAL_5MIN = "FIVE_MINUTE"
