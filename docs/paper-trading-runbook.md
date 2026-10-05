@@ -30,6 +30,18 @@ you've read that doc first.
   zone universe (or even both index underlyings at higher call volume). Don't lower this without
   re-checking rate-limit error counts in the logs first.
 
+- **`zone-paper-bot.timer` is disabled on the VPS as of 2026-10-05** — focus is the index options
+  bot only for now. The equity zone bot was being OOM-killed mid-session (961 MB RAM, no swap; kills
+  on Sep 16/17/18/28/29/30) and was eating the shared AngelOne rate limit. Its state is only saved at
+  the end of a cycle, so a kill loses any position opened in that cycle (PIDILITIND 2026-09-29 was
+  lost this way; the INDUSINDBK 2026-09-28 option row has entry = exit = 36.75 because the restart
+  re-priced the entry). Fix both before re-enabling:
+  `sudo systemctl enable --now zone-paper-bot.timer`.
+- **The index bot refreshes its own 5m history cache at every startup**
+  (`_refresh_history_cache` -> `backtest/fetch_index_data.py::fetch_index_5m`, ~1-2 min of API
+  calls before the watchlist is ready). A `history cache refresh FAILED` or `cached 5m history ends
+  ...` WARNING in the session log means that day's zones are unreliable.
+
 ## Setup (manual — not yet wired into `setup_vps.sh`)
 
 `deploy/setup_vps.sh` only installs `india-orb-bot.service`/`.timer`. The zone and index-options
@@ -129,6 +141,17 @@ ssh india-vps "grep -c 'exceeding access rate' ~/india-orb-bot/logs/zone_paper_\
   journal entries written before that date still contain them (JWTs expire at midnight; the API key does
   not). Don't paste raw journal output anywhere external; consider `journalctl --vacuum-time` on the VPS
   and rotating the SmartAPI key if the old journal or a transcript could have been exposed.
+- **Index bot ran on a stale history cache from 2026-08-01 to 2026-10-02 (fixed 2026-10-05).** The
+  cached `{NIFTY,BANKNIFTY}_NSE_5m.parquet` ended 2026-07-31 and nothing wrote live bars back, so
+  every session's bars sat directly after July's with a hole in between. ATR/volume averages computed
+  across that hole produced zones that are absent from a full-history scan -- including the
+  2026-08-12 NIFTY zone behind the +44% paper trade and a 2026-09-29 BANKNIFTY zone. Treat index
+  paper trades from that window as invalid (the 2026-09-10 NIFTY trade used a genuine June zone).
+- **The index strategy is signal-starved (measured 2026-10-05, 108 trading days of 5m bars).** Live
+  settings find 1 reversal zone on NIFTY and 0 on BANKNIFTY. Loosening the detector's volume /
+  breakout-size filters via `run_symbol(..., zone_kwargs=...)` did not help: at most 5 reversal
+  trades, 0 winners on the underlying in every variant, simulated option P&L between -42% and +2%
+  summed. Too few trades to prove anything, but no evidence for loosening -- live filters unchanged.
 - Neither service is covered by `setup_vps.sh`'s automated install — a fresh VPS needs the manual
   steps above run once.
 - Neither is restarted by `update_vps.sh` — a code change needs the manual restart command above,

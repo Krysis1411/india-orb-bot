@@ -193,6 +193,8 @@ def run_symbol(
                                      # experiments on the reversal-only bucket (the one actually
                                      # traded live as of 2026-09-17), not the standing diagnostic
                                      # default below which keeps scanning both classes.
+    zone_kwargs: dict | None = None,   # overrides for the 5m find_zones() thresholds -- for filter
+                                         # sweeps only, never set live.
 ) -> list[dict]:
     h_path = DATA_DIR / f"{symbol}_NSE_1h.parquet"
     m_path = DATA_DIR / f"{symbol}_NSE_5m.parquet"
@@ -213,6 +215,7 @@ def run_symbol(
         five, timeframe="5m",
         enforce_body_filter=enforce_body_filter,
         enforce_gap_filter=enforce_gap_filter,
+        **(zone_kwargs or {}),
     )
     if reversal_only:
         m_zones = [z for z in m_zones if z.is_reversal]

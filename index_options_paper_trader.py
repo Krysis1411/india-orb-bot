@@ -97,6 +97,37 @@ def _warm_start_bars(name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     bars_1h = load_bars_df(h_path) if h_path.exists() else pd.DataFrame()
     return bars_5m, bars_1h
 
+
+def _refresh_history_cache(client: AngelOneClient) -> None:
+    """Bring the cached 5m parquet up to date before warm-starting from it.
+
+    Nothing else ever writes live bars back to the cache, and each cycle only
+    fetches TODAY's bars -- so without this the warm-start history ends at
+    whenever fetch_index_data.py was last run by hand. Found 2026-10-05: the
+    cache had ended 2026-07-31 for two months, leaving a hole between it and
+    each day's live bars. ATR/volume averages computed across that hole
+    produced zones that don't exist in the real data (the 2026-08-12 NIFTY
+    zone behind the +44% paper trade is absent from a full-history scan).
+    A failed refresh is logged loudly but doesn't stop the bot."""
+    from backtest.fetch_index_data import fetch_index_5m
+
+    for name in UNDERLYINGS:
+        try:
+            fetch_index_5m(client, name)
+        except Exception as e:
+            log.warning(f"{name}: history cache refresh FAILED ({e}) -- warm-start data may have a gap, zones are unreliable today")
+
+
+def _warn_if_cache_stale(name: str, bars_5m: pd.DataFrame) -> None:
+    """5 calendar days covers a long weekend; anything older means sessions
+    are missing between the cache and today's live bars."""
+    if bars_5m.empty:
+        log.warning(f"{name}: no cached 5m history at all -- zones are unreliable until it is fetched")
+        return
+    age_days = (pd.Timestamp.now(tz="UTC") - bars_5m.index[-1]).days
+    if age_days > 5:
+        log.warning(f"{name}: cached 5m history ends {bars_5m.index[-1].date()} ({age_days} days ago) -- zones are unreliable today")
+
 _LOG_FORMAT = "%(asctime)s IST | %(levelname)s | %(message)s"
 logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
 logging.getLogger().handlers[0].setFormatter(ISTFormatter(_LOG_FORMAT))
@@ -177,6 +208,7 @@ class IndexOptionsPaperTrader:
             return False
         state = UnderlyingState(name, INDEX_TOKENS[name], fut["token"], fut["symbol"])
         state.bars_5m, state.bars_1h = _warm_start_bars(name)
+        _warn_if_cache_stale(name, state.bars_5m)
         if len(state.bars_5m) >= 50:
             # Reversal-only again as of 2026-09-17 -- see zone_paper_trader.py's
             # matching comment: continuation zones were run live for two days
@@ -513,6 +545,7 @@ if __name__ == "__main__":
         log.error("AngelOne authentication failed — check credentials in .env")
         raise SystemExit(1)
 
+    _refresh_history_cache(client)
     trader = IndexOptionsPaperTrader(client)
     ready = 0
     for name in UNDERLYINGS:

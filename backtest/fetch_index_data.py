@@ -30,7 +30,6 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import yfinance as yf
 from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -61,11 +60,18 @@ def _fetch_chunk(client: AngelOneClient, name: str, token: str, from_dt: datetim
         "fromdate": from_dt.strftime(fmt),
         "todate": to_dt.strftime(fmt),
     }
-    try:
-        resp = client._obj.getCandleData(params)
-    except Exception as e:
-        print(f"  WARN  {name}: {from_dt.date()}→{to_dt.date()} — {e}")
-        return None
+    # One retry: a rate-limited chunk would otherwise leave a silent hole in
+    # the cache, and the live index bot now calls this at every startup.
+    resp = None
+    for attempt in range(2):
+        try:
+            resp = client._obj.getCandleData(params)
+            break
+        except Exception as e:
+            print(f"  WARN  {name}: {from_dt.date()}→{to_dt.date()} — {e}")
+            if attempt == 1:
+                return None
+            time.sleep(3.0)
     if not resp or not resp.get("status"):
         return None
     candles = resp.get("data") or []
@@ -150,6 +156,11 @@ def fetch_index_5m(client: AngelOneClient, name: str, months: int = 3) -> Path:
     ist_df.index = ist_df.index.tz_convert(IST)
     ist_df = ist_df.between_time(_NSE_START, _NSE_END)
     ist_df.index = ist_df.index.tz_convert("UTC")
+    # Never cache a bar that is still forming (a fetch during market hours
+    # returns the in-progress bar with partial OHLC) -- the live bot only
+    # appends bars it doesn't already have, so a partial bar written here
+    # would never be corrected.
+    ist_df = ist_df[ist_df.index + pd.Timedelta(minutes=5) <= pd.Timestamp.now(tz="UTC")]
 
     # Substitute real futures volume for the index's always-zero volume --
     # zone_detector.py's legin/breakout volume-ratio filters need genuine
@@ -182,6 +193,8 @@ def fetch_index_5m(client: AngelOneClient, name: str, months: int = 3) -> Path:
 
 
 def fetch_index_1h(name: str) -> Path:
+    import yfinance as yf  # lazy: the live bot imports this module for fetch_index_5m only
+
     yf_sym = _YF_TICKERS[name]
     raw = yf.download(yf_sym, period="730d", interval="1h", progress=False, auto_adjust=True)
     if raw.empty:
