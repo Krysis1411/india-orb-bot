@@ -1,0 +1,16 @@
+[Unit]
+Description=Collect NIFTY/BANKNIFTY index, futures and option history (AngelOne SmartAPI, read-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__REPO_DIR__
+ExecStart=__REPO_DIR__/venv/bin/python -m backtest.collect_market_data
+# A full pass over ~2000 option contracts takes over an hour; oneshot units
+# otherwise get killed at the default start timeout.
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

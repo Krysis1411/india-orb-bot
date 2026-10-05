@@ -42,6 +42,14 @@ you've read that doc first.
   calls before the watchlist is ready). A `history cache refresh FAILED` or `cached 5m history ends
   ...` WARNING in the session log means that day's zones are unreliable.
 
+- **`market-data-collector.timer` (Mon-Fri 16:05) records everything AngelOne serves for
+  NIFTY/BANKNIFTY** into `backtest/data/market/` -- index + India VIX bars (1m to daily, years
+  deep), every listed index future, and 5m / 1m / open-interest history for every option contract
+  within 10% of spot. Option history disappears from AngelOne when a contract expires, so a day
+  this doesn't run is data lost for good. Check it with
+  `venv/bin/python -m backtest.collect_market_data --summary` and
+  `journalctl -u market-data-collector -n 30`. Installed the same manual way as the bot services.
+
 ## Setup (manual — not yet wired into `setup_vps.sh`)
 
 `deploy/setup_vps.sh` only installs `india-orb-bot.service`/`.timer`. The zone and index-options

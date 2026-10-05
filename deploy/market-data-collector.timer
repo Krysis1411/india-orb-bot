@@ -1,0 +1,12 @@
+[Unit]
+Description=Collect index/futures/option history every weekday after market close
+
+[Timer]
+# After the paper trader has exited for the day (it leaves by ~15:50), so the
+# two never compete for AngelOne's rate limit. Persistent: a missed run means
+# a day of option data closer to being lost at expiry, so catch up on boot.
+OnCalendar=Mon..Fri 16:05:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
