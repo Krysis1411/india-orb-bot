@@ -160,6 +160,18 @@ ssh india-vps "grep -c 'exceeding access rate' ~/india-orb-bot/logs/zone_paper_\
   breakout-size filters via `run_symbol(..., zone_kwargs=...)` did not help: at most 5 reversal
   trades, 0 winners on the underlying in every variant, simulated option P&L between -42% and +2%
   summed. Too few trades to prove anything, but no evidence for loosening -- live filters unchanged.
+- **Ten-year index backtest: the zone strategy has no edge on NIFTY/BANKNIFTY (run 2026-10-05).**
+  The near-month future's token (`{NAME}..FUT`) serves a clean rolling near-month series back to
+  2016-04 -- full 75-bar days, no zero-volume bars, basis decaying to ~0 at each monthly expiry then
+  resetting -- so spot OHLC + futures volume gives 10.5 years of 5m bars the unmodified strategy can
+  run on (`run_symbol` on `backtest/data/market/index/{NAME}_5m.parquet` with `volume` replaced by
+  `futures/{NAME}<near-month>FUT_5m.parquet`). Result with live settings, both indices combined:
+  7 reversal trades in 10.5 years, 1 winner, -2.8% summed net on the index. Continuation zones:
+  138 trades, ~16% win rate, profit factor 0.08-0.26. Softer filters (leg-in volume 1.0, breakout
+  volume 1.2, breakout 1.5 ATR): 19 reversal trades, 2 winners, -6.4%. The simulated-option column
+  looks better than the index column in places (e.g. NIFTY continuation) only because it uses flat
+  IV and no spread or costs -- don't read it as an edge. Don't put real money behind this entry
+  logic on indices.
 - Neither service is covered by `setup_vps.sh`'s automated install — a fresh VPS needs the manual
   steps above run once.
 - Neither is restarted by `update_vps.sh` — a code change needs the manual restart command above,
