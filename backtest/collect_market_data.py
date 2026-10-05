@@ -123,8 +123,11 @@ class Collector:
                 continue
             if resp and resp.get("status"):
                 return resp.get("data") or []
-            # status False with "no data"-style messages is a real empty answer
-            if resp and not resp.get("errorcode"):
+            # getOIData answers a window with no data at all (e.g. entirely
+            # before the contract was listed) with AB1012 "Invalid Bad Request"
+            # rather than an empty list -- that is the end of its history, not
+            # a failure worth three retries per contract.
+            if resp and (not resp.get("errorcode") or (kind == "oi" and resp.get("errorcode") == "AB1012")):
                 return []
             time.sleep(5.0 * (attempt + 1))
         self.failed += 1
@@ -282,8 +285,8 @@ if __name__ == "__main__":
     client._ensure_connected()
     # SmartApi logs every failed/empty request at ERROR; an illiquid strike
     # with no candles is routine here, not an error worth a journal line each.
-    logging.getLogger("SmartApi").setLevel(logging.CRITICAL)
-    logging.getLogger("smartConnect").setLevel(logging.CRITICAL)
+    import logzero
+    logzero.loglevel(logging.CRITICAL)
 
     collector = Collector(client, deadline)
     started = time.monotonic()
